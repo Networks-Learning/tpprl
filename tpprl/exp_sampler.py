@@ -5,16 +5,15 @@ class ExpCDFSampler:
     """This is an exponential sampler."""
 
     @Deco.optioned()
-    def __init__(self, Wh, Wt, bt, init_h, t_min, seed=42):
+    def __init__(self, vt, wt, bt, init_h, t_min, seed=42):
         self.seed = seed
-        self.Wh = np.asarray(Wh)
-        self.Wt = np.asarray(Wt)
-        self.bt = np.asarray(bt)
+        self.vt = np.asarray(vt).squeeze()
+        self.wt = np.asarray(wt).squeeze()
+        self.bt = np.asarray(bt).squeeze()
 
-        self.w = np.asarray(Wt)
+        self.w = np.asarray(wt).squeeze()
         self.random_state = np.random.RandomState(seed)
         self.reset(t_min, init_h, reset_sample=True)
-
 
     def reset_only_sample(self, cur_time):
         """Resets only the present sample.
@@ -39,7 +38,7 @@ class ExpCDFSampler:
             self.u_unif -= self.cdf(cur_time)
 
         self.h = init_h
-        self.c = np.exp(self.Wh.dot(self.h) + self.bt)
+        self.c = np.exp(self.vt.dot(self.h) + self.bt)
         self.t0 = cur_time
 
         return self.generate_sample()
