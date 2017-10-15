@@ -38,7 +38,7 @@ class ExpCDFSampler:
             self.u_unif -= self.cdf(cur_time)
 
         self.h = init_h
-        self.c = np.exp(self.vt.dot(self.h) + self.bt)
+        self.c = np.squeeze(np.exp(self.vt.dot(self.h) + self.bt))
         self.t0 = cur_time
 
         return self.generate_sample()
