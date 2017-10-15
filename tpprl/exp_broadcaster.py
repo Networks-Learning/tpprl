@@ -18,6 +18,7 @@ class ExpBroadcaster(OM.Broadcaster):
             'Wh': trainer.tf_Wh,
             'Bh': trainer.tf_Bh,
             'Wt': trainer.tf_Wt,
+            'Wr': trainer.tf_Wr,
 
             'wt': trainer.tf_wt,
             'vt': trainer.tf_vt,
@@ -45,10 +46,13 @@ class ExpBroadcaster(OM.Broadcaster):
     def update_hidden_state(self, src_id, time_delta):
         """Returns the hidden state after a post by src_id and time delta."""
         # Best done using self.sess.run here.
+        r_t = self.state.get_wall_rank(self.src_id, self.sink_ids, dict_form=False)
+
         feed_dict = {
             self.trainer.tf_b_idx: np.asarray([self.trainer.src_embed_map[src_id]]),
-            self.trainer.tf_t_delta: np.asarray([time_delta]),
-            self.trainer.tf_h: self.cur_h
+            self.trainer.tf_t_delta: np.asarray([time_delta]).reshape(-1),
+            self.trainer.tf_h: self.cur_h,
+            self.trainer.tf_rank: np.asarray([np.mean(r_t)]).reshape(-1)
         }
         return self.trainer.sess.run(self.trainer.tf_h_next,
                                      feed_dict=feed_dict)
@@ -70,7 +74,8 @@ class ExpBroadcaster(OM.Broadcaster):
                                     event.cur_time,
                                     self.cur_h,
                                     own_event=event.src_id == self.src_id)
-            next_delta = np.squeeze(next_post_time - self.last_self_event_time)
+            next_delta = (next_post_time - self.last_self_event_time)[0]
+            # print(next_delta)
             assert next_delta >= 0
             return next_delta
 
@@ -80,7 +85,7 @@ OM.SimOpts.registerSource('ExpBroadcaster', ExpBroadcaster)
 class ExpTrainer:
 
     @Deco.optioned()
-    def __init__(self, Wm, Wh, Wt, Bh, vt, wt, bt, init_h, sess, sim_opts,
+    def __init__(self, Wm, Wh, Wt, Wr, Bh, vt, wt, bt, init_h, sess, sim_opts,
                  scope=None, t_min=0):
         """Initialize the trainer with the policy parameters."""
 
@@ -101,6 +106,8 @@ class ExpTrainer:
                                              initializer=tf.constant_initializer(Wh))
                 self.tf_Wt = tf.get_variable(name="Wt", shape=Wt.shape,
                                              initializer=tf.constant_initializer(Wt))
+                self.tf_Wr = tf.get_variable(name="Wr", shape=Wr.shape,
+                                             initializer=tf.constant_initializer(Wr))
                 self.tf_Bh = tf.get_variable(name="Bh", shape=Bh.shape,
                                              initializer=tf.constant_initializer(Bh))
 
@@ -108,12 +115,14 @@ class ExpTrainer:
                                             initializer=tf.constant_initializer(init_h))
                 self.tf_b_idx = tf.placeholder(name="b_idx", shape=1, dtype=tf.int32)
                 self.tf_t_delta = tf.placeholder(name="t_delta", shape=1, dtype=tf.float32)
+                self.tf_rank = tf.placeholder(name="rank", shape=1, dtype=tf.float32)
 
                 self.tf_h_next = tf.nn.relu(
                     tf.transpose(
                         tf.nn.embedding_lookup(self.tf_Wm, self.tf_b_idx, name="b_embed")
                     ) +
                     tf.matmul(self.tf_Wh, self.tf_h) + self.tf_Bh +
+                    self.tf_Wr * self.tf_rank +
                     self.tf_Wt * self.tf_t_delta,
                     name="h_next"
                 )
