@@ -1,4 +1,5 @@
 import redqueen.opt_model as OM
+import redqueen.utils as RU
 import warnings
 import tensorflow as tf
 import decorated_options as Deco
@@ -74,7 +75,7 @@ class ExpBroadcaster(OM.Broadcaster):
                                     event.cur_time,
                                     self.cur_h,
                                     own_event=event.src_id == self.src_id)
-            next_delta = (next_post_time - self.last_self_event_time)[0]
+            next_delta = next_post_time - self.last_self_event_time
             # print(next_delta)
             assert next_delta >= 0
             return next_delta
@@ -86,7 +87,7 @@ class ExpTrainer:
 
     @Deco.optioned()
     def __init__(self, Wm, Wh, Wt, Wr, Bh, vt, wt, bt, init_h, sess, sim_opts,
-                 scope=None, t_min=0):
+                 scope=None, t_min=0, batch_size=16, max_events=100):
         """Initialize the trainer with the policy parameters."""
 
         num_broadcasters = len(sim_opts.other_sources) + 1
@@ -94,6 +95,11 @@ class ExpTrainer:
         self.src_embed_map = {x.src_id: idx + 1
                               for idx, x in enumerate(sim_opts.create_other_sources())}
         self.src_embed_map[sim_opts.src_id] = 0
+
+        self.batch_size = batch_size
+        self.max_events = max_events
+        self.num_hidden_states = init_h.shape[0]
+
         init_h = np.reshape(init_h, (-1, 1))
         Bh = np.reshape(Bh, (-1, 1))
 
@@ -110,8 +116,7 @@ class ExpTrainer:
                                              initializer=tf.constant_initializer(Wr))
                 self.tf_Bh = tf.get_variable(name="Bh", shape=Bh.shape,
                                              initializer=tf.constant_initializer(Bh))
-
-                self.tf_h = tf.get_variable(name="h", shape=init_h.shape,
+                self.tf_h = tf.get_variable(name="h", shape=(self.num_hidden_states, 1),
                                             initializer=tf.constant_initializer(init_h))
                 self.tf_b_idx = tf.placeholder(name="b_idx", shape=1, dtype=tf.int32)
                 self.tf_t_delta = tf.placeholder(name="t_delta", shape=1, dtype=tf.float32)
@@ -121,9 +126,10 @@ class ExpTrainer:
                     tf.transpose(
                         tf.nn.embedding_lookup(self.tf_Wm, self.tf_b_idx, name="b_embed")
                     ) +
-                    tf.matmul(self.tf_Wh, self.tf_h) + self.tf_Bh +
+                    tf.matmul(self.tf_Wh, self.tf_h) +
                     self.tf_Wr * self.tf_rank +
-                    self.tf_Wt * self.tf_t_delta,
+                    self.tf_Wt * self.tf_t_delta +
+                    self.tf_Bh,
                     name="h_next"
                 )
 
@@ -134,14 +140,93 @@ class ExpTrainer:
                                              initializer=tf.constant_initializer(vt))
                 self.tf_wt = tf.get_variable(name="wt", shape=wt.shape,
                                              initializer=tf.constant_initializer(wt))
-                self.tf_cur_time = tf.placeholder(name="t", shape=1, dtype=tf.float32)
-                self.u_t = tf.exp(
-                    self.tf_vt * self.tf_h +
-                    self.tf_cur_time * self.tf_wt +
-                    self.tf_bt,
-                    name="u_t"
-                )
+                # self.tf_t_delta = tf.placeholder(name="t_delta", shape=1, dtype=tf.float32)
+                # self.tf_u_t = tf.exp(
+                #     tf.tensordot(self.tf_vt, self.tf_h, axes=1) +
+                #     self.tf_t_delta * self.tf_wt +
+                #     self.tf_bt,
+                #     name="u_t"
+                # )
 
+            # Create a large dynamic_rnn kind of network which can calculate
+            # the gradients for a given given batch of simulations.
+            with tf.variable_scope("training"):
+                self.tf_batch_rewards = tf.placeholder(name="rewards",
+                                                 shape=(batch_size, 1),
+                                                 dtype=tf.float32)
+                self.tf_batch_t_deltas = tf.placeholder(name="t_deltas",
+                                                  shape=(batch_size, max_events),
+                                                  dtype=tf.float32)
+                self.tf_batch_b_idxes = tf.placeholder(name="b_idxes",
+                                                 shape=(batch_size, max_events),
+                                                 dtype=tf.int32)
+                self.tf_batch_ranks = tf.placeholder(name="ranks",
+                                               shape=(batch_size, max_events),
+                                               dtype=tf.float32)
+                self.tf_batch_seq_len = tf.placeholder(name="seq_len",
+                                                 shape=(batch_size, 1),
+                                                 dtype=tf.int32)
+                self.tf_batch_init_h = tf_batch_h_t = tf.zeros(name="init_h",
+                                              shape=(batch_size, self.num_hidden_states),
+                                              dtype=tf.float32)
+
+                self.LL = tf.zeros(name="log_likelihood", dtype=tf.float32, shape=(batch_size))
+                self.loss = tf.zeros(name="loss", dtype=tf.float32, shape=(batch_size))
+
+                def batch_u_theta(batch_t_deltas):
+                    return tf.exp(
+                            tf.matmul(tf_batch_h_t, self.tf_vt) +
+                            self.tf_wt * tf.expand_dims(batch_t_deltas, 1) +
+                            self.tf_bt
+                        )
+
+
+                # TODO: Convert this to a tf.while_loop, perhaps.
+                # The performance benefit is debatable.
+                for evt_idx in range(max_events):
+                    tf_batch_h_t = tf.where(
+                        tf.tile(evt_idx <= self.tf_batch_seq_len, [1, self.num_hidden_states]),
+                        tf.nn.relu(
+                            tf.nn.embedding_lookup(self.tf_Wm,
+                                                   self.tf_batch_b_idxes[:, evt_idx]) +
+                            tf.matmul(tf_batch_h_t, self.tf_Wh, transpose_b=True) +
+                            tf.matmul(tf.expand_dims(self.tf_batch_ranks[:, evt_idx], 1),
+                                      self.tf_Wr, transpose_b=True) +
+                            tf.matmul(tf.expand_dims(self.tf_batch_t_deltas[:, evt_idx], 1),
+                                      self.tf_Wt, transpose_b=True) +
+                            tf.tile(tf.transpose(self.tf_Bh), [batch_size, 1])
+                        ),
+                        tf.zeros(dtype=tf.float32, shape=(batch_size, self.num_hidden_states))
+                        # The gradient of a constant w.r.t. a variable is None or 0
+                    )
+                    tf_batch_u_theta = tf.where(
+                        evt_idx <= self.tf_batch_seq_len,
+                        batch_u_theta(self.tf_batch_t_deltas[:, evt_idx]),
+                        tf.zeros(dtype=tf.float32, shape=(batch_size, 1))
+                    )
+
+                    self.LL += tf.where(tf.squeeze(evt_idx <= self.tf_batch_seq_len),
+                                    tf.where(tf.equal(self.tf_batch_b_idxes[:, evt_idx], sim_opts.src_id),
+                                        tf.squeeze(tf.log(tf_batch_u_theta)),
+                                        tf.zeros(dtype=tf.float32, shape=batch_size)) -
+                                    (1 / self.tf_wt) * tf.squeeze(
+                                        batch_u_theta(tf.zeros(dtype=tf.float32, shape=batch_size)) -
+                                        tf_batch_u_theta
+                                    ),
+                                    tf.zeros(dtype=tf.float32, shape=batch_size))
+
+                    self.loss += tf.where(tf.squeeze(evt_idx <= self.tf_batch_seq_len),
+                                    (1 / (2 * self.tf_wt)) * tf.squeeze(
+                                        tf.square(batch_u_theta(tf.zeros(dtype=tf.float32, shape=batch_size))) -
+                                        tf.square(tf_batch_u_theta)
+                                    ),
+                                    tf.zeros(dtype=tf.float32, shape=(batch_size)))
+
+        # Here, outside the loop, add the survival term for the batch to
+        # both the loss and to the LL.
+        # TODO
+        # self.LL -= ...
+        # self.loss += ...
 
         sim_feed_dict = {
             self.tf_Wm: Wm,
@@ -154,6 +239,7 @@ class ExpTrainer:
             self.tf_wt: wt,
         }
 
+
         self.sim_opts = sim_opts
         self.src_id = sim_opts.src_id
         self.sess = sess
@@ -162,7 +248,8 @@ class ExpTrainer:
         """Initialize the graph."""
         self.sess.run(tf.global_variables_initializer())
         # No more nodes will be added to the graph beyond this point.
-        # Recommended way to prevent memory leaks afterwards:
+        # Recommended way to prevent memory leaks afterwards, esp. if the
+        # session will be used in a multi-threaded manner.
         # https://stackoverflow.com/questions/38694111/
         self.sess.graph.finalize()
 
@@ -179,3 +266,62 @@ class ExpTrainer:
         mgr = run_sim_opts.create_manager_with_broadcaster(exp_b)
         mgr.run_dynamic()
         return mgr.get_state().get_dataframe()
+
+    def reward_fn(self, df):
+        """Calculate the reward for a given trajectory."""
+        rank_in_tau = RU.rank_of_src_in_df(df=df, src_id=self.src_id).mean(axis=1)
+        rank_dt = np.diff(np.concatenate([rank_in_tau.index.values,
+                                          [self.sim_opts.end_time]]))
+        return np.sum((rank_in_tau ** 2) * rank_dt)
+
+    def get_feed_dict(self, batch_df):
+        """Produce a feed_dict for the given batch."""
+        assert all(len(df.sink_id.unique()) == 1 for df in batch_df), "Can only handle one sink at the moment."
+        assert len(batch_df) == self.batch_size, "The batch should consist of {} simulations, not {}.".format(self.batch_size, len(batch_df))
+
+        full_shape = (self.batch_size, self.max_events)
+
+        batch_rewards = np.asarray([self.reward_fn(x) for x in batch_df])[:, np.newaxis]
+        batch_t_deltas = np.zeros(shape=full_shape, dtype=float)
+
+        batch_b_idxes = np.zeros(shape=full_shape, dtype=int)
+        batch_ranks = np.zeros(shape=full_shape, dtype=float)
+        batch_seq_len = np.asarray([np.minimum(x.shape[0], self.max_events) for x in batch_df], dtype=int)[:, np.newaxis]
+        batch_init_h = np.zeros(shape=(self.batch_size, self.num_hidden_states), dtype=float)
+
+        for idx, df in enumerate(batch_df):
+            # They are sorted by time already.
+            batch_len = int(batch_seq_len[idx])
+            rank_in_tau = RU.rank_of_src_in_df(df=df, src_id=self.src_id).mean(axis=1)
+            batch_ranks[idx, 0:batch_len] = rank_in_tau.values[0:batch_len]
+            batch_b_idxes[idx, 0:batch_len] = df.src_id.map(self.src_embed_map).values[0:batch_len]
+            batch_t_deltas[idx, 0:batch_len] = df.time_delta.values[0:batch_len]
+
+        return {
+            self.tf_batch_b_idxes: batch_b_idxes,
+            self.tf_batch_rewards: batch_rewards,
+            self.tf_batch_seq_len: batch_seq_len,
+            self.tf_batch_t_deltas: batch_t_deltas,
+            self.tf_batch_ranks: batch_ranks,
+            self.tf_batch_init_h: batch_init_h
+        }
+
+    def calc_grad(self, df):
+        """Calculate the gradient with respect to a certain run."""
+        # 1. Keep updating the u_{\theta}(t) in the tensorflow graph starting from
+        #    t = 0 with each event and calculating the gradient.
+        # 2. Finally, sum together the gradient calculated for the complete
+        #    sequence.
+
+        # Actually, we can calculate the gradient analytically in this case.
+        # Not quite: we can integrate analytically, but differentiation is
+        # still a little tricky because of the hidden state.
+        R_tau = self.reward_fn(df, src_id=self.src_id)
+
+        # Loop over the events.
+        unique_events = df.groupby('event_id').first()
+        for t_delta, src_id in unique_events[['time_delta', 'src_id']].values:
+            # TODO
+            pass
+
+
