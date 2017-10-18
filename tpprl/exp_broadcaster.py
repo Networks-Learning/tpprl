@@ -166,12 +166,18 @@ class ExpTrainer:
                 self.tf_batch_seq_len = tf.placeholder(name="seq_len",
                                                  shape=(batch_size, 1),
                                                  dtype=tf.int32)
+                self.tf_batch_last_interval = tf.placeholder(name="last_interval",
+                                                             shape=batch_size,
+                                                             dtype=tf.float32)
+
                 self.tf_batch_init_h = tf_batch_h_t = tf.zeros(name="init_h",
                                               shape=(batch_size, self.num_hidden_states),
                                               dtype=tf.float32)
 
                 self.LL = tf.zeros(name="log_likelihood", dtype=tf.float32, shape=(batch_size))
                 self.loss = tf.zeros(name="loss", dtype=tf.float32, shape=(batch_size))
+
+                t_0 = tf.zeros(name="event_time", shape=batch_size, dtype=tf.float32)
 
                 def batch_u_theta(batch_t_deltas):
                     return tf.exp(
@@ -208,37 +214,39 @@ class ExpTrainer:
                     self.LL += tf.where(tf.squeeze(evt_idx <= self.tf_batch_seq_len),
                                     tf.where(tf.equal(self.tf_batch_b_idxes[:, evt_idx], sim_opts.src_id),
                                         tf.squeeze(tf.log(tf_batch_u_theta)),
-                                        tf.zeros(dtype=tf.float32, shape=batch_size)) -
+                                        tf.zeros(dtype=tf.float32, shape=batch_size)) +
                                     (1 / self.tf_wt) * tf.squeeze(
-                                        batch_u_theta(tf.zeros(dtype=tf.float32, shape=batch_size)) -
+                                        batch_u_theta(t_0) -
                                         tf_batch_u_theta
                                     ),
                                     tf.zeros(dtype=tf.float32, shape=batch_size))
 
                     self.loss += tf.where(tf.squeeze(evt_idx <= self.tf_batch_seq_len),
-                                    (1 / (2 * self.tf_wt)) * tf.squeeze(
-                                        tf.square(batch_u_theta(tf.zeros(dtype=tf.float32, shape=batch_size))) -
+                                    -(1 / (2 * self.tf_wt)) * tf.squeeze(
+                                        tf.square(batch_u_theta(t_0)) -
                                         tf.square(tf_batch_u_theta)
                                     ),
                                     tf.zeros(dtype=tf.float32, shape=(batch_size)))
 
         # Here, outside the loop, add the survival term for the batch to
         # both the loss and to the LL.
-        # TODO
-        # self.LL -= ...
-        # self.loss += ...
+        self.LL += (1 / self.tf_wt) * tf.squeeze(
+            batch_u_theta(t_0) - batch_u_theta(self.tf_batch_last_interval)
+        )
+        self.loss += - (1 / (2 * self.tf_wt)) * tf.squeeze(
+            tf.square(batch_u_theta(t_0)) - tf.square(self.tf_batch_last_interval)
+        )
 
-        sim_feed_dict = {
-            self.tf_Wm: Wm,
-            self.tf_Wh: Wh,
-            self.tf_Wt: Wt,
-            self.tf_Bh: Bh,
+        # sim_feed_dict = {
+        #     self.tf_Wm: Wm,
+        #     self.tf_Wh: Wh,
+        #     self.tf_Wt: Wt,
+        #     self.tf_Bh: Bh,
 
-            self.tf_bt: bt,
-            self.tf_vt: vt,
-            self.tf_wt: wt,
-        }
-
+        #     self.tf_bt: bt,
+        #     self.tf_vt: vt,
+        #     self.tf_wt: wt,
+        # }
 
         self.sim_opts = sim_opts
         self.src_id = sim_opts.src_id
@@ -289,6 +297,8 @@ class ExpTrainer:
         batch_seq_len = np.asarray([np.minimum(x.shape[0], self.max_events) for x in batch_df], dtype=int)[:, np.newaxis]
         batch_init_h = np.zeros(shape=(self.batch_size, self.num_hidden_states), dtype=float)
 
+        batch_last_interval = np.zeros(shape=self.batch_size, dtype=float)
+
         for idx, df in enumerate(batch_df):
             # They are sorted by time already.
             batch_len = int(batch_seq_len[idx])
@@ -296,6 +306,11 @@ class ExpTrainer:
             batch_ranks[idx, 0:batch_len] = rank_in_tau.values[0:batch_len]
             batch_b_idxes[idx, 0:batch_len] = df.src_id.map(self.src_embed_map).values[0:batch_len]
             batch_t_deltas[idx, 0:batch_len] = df.time_delta.values[0:batch_len]
+            if batch_len == df.shape[0]:
+                # This batch has consumed all the events
+                batch_last_interval[idx] = self.sim_opts.end_time - df.t.iloc[-1]
+            else:
+                batch_last_interval[idx] = df.time_delta[batch_len]
 
         return {
             self.tf_batch_b_idxes: batch_b_idxes,
@@ -303,7 +318,8 @@ class ExpTrainer:
             self.tf_batch_seq_len: batch_seq_len,
             self.tf_batch_t_deltas: batch_t_deltas,
             self.tf_batch_ranks: batch_ranks,
-            self.tf_batch_init_h: batch_init_h
+            self.tf_batch_init_h: batch_init_h,
+            self.tf_batch_last_interval: batch_last_interval,
         }
 
     def calc_grad(self, df):
