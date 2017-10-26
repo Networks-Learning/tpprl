@@ -239,8 +239,14 @@ class ExpRecurrentTrainer:
             batch_u_theta(t_0) - batch_u_theta(self.tf_batch_last_interval)
         )
         self.loss += - (1 / (2 * self.tf_wt)) * tf.squeeze(
-            tf.square(batch_u_theta(t_0)) - tf.square(self.tf_batch_last_interval)
+            tf.square(batch_u_theta(t_0)) -
+            tf.square(batch_u_theta(self.tf_batch_last_interval))
         )
+
+        self.LL_grads = {
+            self.tf_Wh: tf.gradients(self.LL, self.tf_Wh),
+            # TODO: Fill in
+        }
 
         # sim_feed_dict = {
         #     self.tf_Wm: Wm,
