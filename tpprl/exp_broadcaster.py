@@ -1,6 +1,6 @@
+import numpy as np
 import redqueen.opt_model as OM
 import redqueen.utils as RU
-import warnings
 import tensorflow as tf
 import decorated_options as Deco
 from exp_sampler import ExpCDFSampler
@@ -73,9 +73,10 @@ class ExpRecurrentBroadcaster(OM.Broadcaster):
         else:
             self.cur_h = self.update_hidden_state(event.src_id, event.time_delta)
             next_post_time = self.exp_sampler.register_event(
-                                    event.cur_time,
-                                    self.cur_h,
-                                    own_event=event.src_id == self.src_id)
+                event.cur_time,
+                self.cur_h,
+                own_event=event.src_id == self.src_id
+            )
             next_delta = next_post_time - self.last_self_event_time
             # print(next_delta)
             assert next_delta >= 0
@@ -154,27 +155,27 @@ class ExpRecurrentTrainer:
             # the gradients for a given given batch of simulations.
             with tf.variable_scope("training"):
                 self.tf_batch_rewards = tf.placeholder(name="rewards",
-                                                 shape=(batch_size, 1),
-                                                 dtype=tf.float32)
+                                                       shape=(batch_size, 1),
+                                                       dtype=tf.float32)
                 self.tf_batch_t_deltas = tf.placeholder(name="t_deltas",
-                                                  shape=(batch_size, max_events),
-                                                  dtype=tf.float32)
+                                                        shape=(batch_size, max_events),
+                                                        dtype=tf.float32)
                 self.tf_batch_b_idxes = tf.placeholder(name="b_idxes",
-                                                 shape=(batch_size, max_events),
-                                                 dtype=tf.int32)
+                                                       shape=(batch_size, max_events),
+                                                       dtype=tf.int32)
                 self.tf_batch_ranks = tf.placeholder(name="ranks",
-                                               shape=(batch_size, max_events),
-                                               dtype=tf.float32)
+                                                     shape=(batch_size, max_events),
+                                                     dtype=tf.float32)
                 self.tf_batch_seq_len = tf.placeholder(name="seq_len",
-                                                 shape=(batch_size, 1),
-                                                 dtype=tf.int32)
+                                                       shape=(batch_size, 1),
+                                                       dtype=tf.int32)
                 self.tf_batch_last_interval = tf.placeholder(name="last_interval",
                                                              shape=batch_size,
                                                              dtype=tf.float32)
 
                 self.tf_batch_init_h = tf_batch_h_t = tf.zeros(name="init_h",
-                                              shape=(batch_size, self.num_hidden_states),
-                                              dtype=tf.float32)
+                                                               shape=(batch_size, self.num_hidden_states),
+                                                               dtype=tf.float32)
 
                 self.LL = tf.zeros(name="log_likelihood", dtype=tf.float32, shape=(batch_size))
                 self.loss = tf.zeros(name="loss", dtype=tf.float32, shape=(batch_size))
@@ -183,11 +184,10 @@ class ExpRecurrentTrainer:
 
                 def batch_u_theta(batch_t_deltas):
                     return tf.exp(
-                            tf.matmul(tf_batch_h_t, self.tf_vt) +
-                            self.tf_wt * tf.expand_dims(batch_t_deltas, 1) +
-                            self.tf_bt
-                        )
-
+                        tf.matmul(tf_batch_h_t, self.tf_vt) +
+                        self.tf_wt * tf.expand_dims(batch_t_deltas, 1) +
+                        self.tf_bt
+                    )
 
                 # TODO: Convert this to a tf.while_loop, perhaps.
                 # The performance benefit is debatable.
@@ -213,22 +213,25 @@ class ExpRecurrentTrainer:
                         tf.zeros(dtype=tf.float32, shape=(batch_size, 1))
                     )
 
-                    self.LL += tf.where(tf.squeeze(evt_idx <= self.tf_batch_seq_len),
-                                    tf.where(tf.equal(self.tf_batch_b_idxes[:, evt_idx], sim_opts.src_id),
-                                        tf.squeeze(tf.log(tf_batch_u_theta)),
-                                        tf.zeros(dtype=tf.float32, shape=batch_size)) +
-                                    (1 / self.tf_wt) * tf.squeeze(
-                                        batch_u_theta(t_0) -
-                                        tf_batch_u_theta
-                                    ),
-                                    tf.zeros(dtype=tf.float32, shape=batch_size))
+                    self.LL += tf.where(
+                        tf.squeeze(evt_idx <= self.tf_batch_seq_len),
+                        tf.where(
+                            tf.equal(self.tf_batch_b_idxes[:, evt_idx], sim_opts.src_id),
+                            tf.squeeze(tf.log(tf_batch_u_theta)),
+                            tf.zeros(dtype=tf.float32, shape=batch_size)) +
+                        (1 / self.tf_wt) * tf.squeeze(
+                            batch_u_theta(t_0) -
+                            tf_batch_u_theta
+                        ),
+                        tf.zeros(dtype=tf.float32, shape=batch_size))
 
-                    self.loss += tf.where(tf.squeeze(evt_idx <= self.tf_batch_seq_len),
-                                    -(1 / (2 * self.tf_wt)) * tf.squeeze(
-                                        tf.square(batch_u_theta(t_0)) -
-                                        tf.square(tf_batch_u_theta)
-                                    ),
-                                    tf.zeros(dtype=tf.float32, shape=(batch_size)))
+                    self.loss += tf.where(
+                        tf.squeeze(evt_idx <= self.tf_batch_seq_len),
+                        -(1 / (2 * self.tf_wt)) * tf.squeeze(
+                            tf.square(batch_u_theta(t_0)) -
+                            tf.square(tf_batch_u_theta)
+                        ),
+                        tf.zeros(dtype=tf.float32, shape=(batch_size)))
 
         # Here, outside the loop, add the survival term for the batch to
         # both the loss and to the LL.
@@ -254,18 +257,19 @@ class ExpRecurrentTrainer:
         self.src_id = sim_opts.src_id
         self.sess = sess
 
-    def initialize(self):
+    def initialize(self, finalize=True):
         """Initialize the graph."""
         self.sess.run(tf.global_variables_initializer())
-        # No more nodes will be added to the graph beyond this point.
-        # Recommended way to prevent memory leaks afterwards, esp. if the
-        # session will be used in a multi-threaded manner.
-        # https://stackoverflow.com/questions/38694111/
-        self.sess.graph.finalize()
+        if finalize:
+            # No more nodes will be added to the graph beyond this point.
+            # Recommended way to prevent memory leaks afterwards, esp. if the
+            # session will be used in a multi-threaded manner.
+            # https://stackoverflow.com/questions/38694111/
+            self.sess.graph.finalize()
 
     def _create_exp_broadcaster(self, seed):
         """Create a new exp_broadcaster with the current params."""
-        return ExpBroadcaster(src_id=self.src_id, seed=seed, trainer=self)
+        return ExpRecurrentBroadcaster(src_id=self.src_id, seed=seed, trainer=self)
 
     def run_sim(self, seed):
         """Run one simulation and return the dataframe.
@@ -429,8 +433,6 @@ class ExpPredTrainer:
         }
         return self.sess.run(self.trainer.tf_h_next,
                                      feed_dict=feed_dict)
-
-
 
     @Deco.optioned()
     def __init__(self, Wm, Wl, Wdt, Wt, Wr, Bh, vt, wt, bt, init_h, init_l, init_pred_dt,
@@ -630,7 +632,7 @@ class ExpPredTrainer:
 
     def _create_exp_broadcaster(self, seed):
         """Create a new exp_broadcaster with the current params."""
-        return ExpBroadcaster(src_id=self.src_id, seed=seed, trainer=self)
+        return ExpPredBroadcaster(src_id=self.src_id, seed=seed, trainer=self)
 
     def run_sim(self, seed):
         """Run one simulation and return the dataframe.
