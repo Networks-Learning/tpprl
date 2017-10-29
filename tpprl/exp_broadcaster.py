@@ -177,8 +177,13 @@ class ExpRecurrentTrainer:
                                                                shape=(batch_size, self.num_hidden_states),
                                                                dtype=tf.float32)
 
-                self.LL = tf.zeros(name="log_likelihood", dtype=tf.float32, shape=(batch_size))
-                self.loss = tf.zeros(name="loss", dtype=tf.float32, shape=(batch_size))
+                self.h_states = []
+                self.LL_log_terms = []
+                self.LL_int_terms = []
+                self.loss_terms = []
+
+                # self.LL = tf.zeros(name="log_likelihood", dtype=tf.float32, shape=(batch_size))
+                # self.loss = tf.zeros(name="loss", dtype=tf.float32, shape=(batch_size))
 
                 t_0 = tf.zeros(name="event_time", shape=batch_size, dtype=tf.float32)
 
@@ -213,25 +218,33 @@ class ExpRecurrentTrainer:
                         tf.zeros(dtype=tf.float32, shape=(batch_size, 1))
                     )
 
-                    self.LL += tf.where(
+                    self.h_states.append(tf_batch_h_t)
+                    self.LL_log_terms.append(tf.where(
                         tf.squeeze(evt_idx <= self.tf_batch_seq_len),
                         tf.where(
                             tf.equal(self.tf_batch_b_idxes[:, evt_idx], sim_opts.src_id),
                             tf.squeeze(tf.log(tf_batch_u_theta)),
-                            tf.zeros(dtype=tf.float32, shape=batch_size)) +
-                        (1 / self.tf_wt) * tf.squeeze(
+                            tf.zeros(dtype=tf.float32, shape=batch_size)),
+                        tf.zeros(dtype=tf.float32, shape=batch_size)))
+
+                    self.LL_int_terms.append(tf.where(
+                        tf.squeeze(evt_idx <= self.tf_batch_seq_len),
+                        - (1 / self.tf_wt) * tf.squeeze(
                             batch_u_theta(t_0) -
                             tf_batch_u_theta
                         ),
-                        tf.zeros(dtype=tf.float32, shape=batch_size))
+                        tf.zeros(dtype=tf.float32, shape=batch_size)))
 
-                    self.loss += tf.where(
+                    self.loss_terms.append(tf.where(
                         tf.squeeze(evt_idx <= self.tf_batch_seq_len),
                         -(1 / (2 * self.tf_wt)) * tf.squeeze(
                             tf.square(batch_u_theta(t_0)) -
                             tf.square(tf_batch_u_theta)
                         ),
-                        tf.zeros(dtype=tf.float32, shape=(batch_size)))
+                        tf.zeros(dtype=tf.float32, shape=(batch_size))))
+
+        self.LL = tf.add_n(self.LL_log_terms) + tf.add_n(self.LL_log_terms)
+        self.loss = tf.add_n(self.loss_terms)
 
         # Here, outside the loop, add the survival term for the batch to
         # both the loss and to the LL.
