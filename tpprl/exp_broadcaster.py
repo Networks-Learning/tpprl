@@ -137,6 +137,8 @@ class ExpRecurrentTrainer:
                     name="h_next"
                 )
 
+                # self.tf_h_next = tf.nn.
+
             with tf.variable_scope("output"):
                 self.tf_bt = tf.get_variable(name="bt", shape=bt.shape,
                                              initializer=tf.constant_initializer(bt))
