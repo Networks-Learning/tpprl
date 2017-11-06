@@ -5,6 +5,41 @@ import tensorflow as tf
 import decorated_options as Deco
 from exp_sampler import ExpCDFSampler
 
+def average_gradients(tower_grads):
+    """Calculate the average gradient for each shared variable across all towers.
+    Note that this function provides a synchronization point across all towers.
+    Args:
+        tower_grads: List of lists of (gradient, variable) tuples. The outer list
+            is over individual gradients. The inner list is over the gradient
+            calculation for each tower.
+    Returns:
+         List of pairs of (gradient, variable) where the gradient has been averaged
+         across all towers.
+    """
+    average_grads = []
+    for grad_and_vars in zip(*tower_grads):
+        # Note that each grad_and_vars looks like the following:
+        #     ((grad0_gpu0, var0_gpu0), ... , (grad0_gpuN, var0_gpuN))
+        grads = []
+        for g, _ in grad_and_vars:
+            # Add 0 dimension to the gradients to represent the tower.
+            expanded_g = tf.expand_dims(g, 0)
+
+            # Append on a 'tower' dimension which we will average over below.
+            grads.append(expanded_g)
+
+        # Average over the 'tower' dimension.
+        grad = tf.concat(axis=0, values=grads)
+        grad = tf.reduce_mean(grad, 0)
+
+        # Keep in mind that the Variables are redundant because they are shared
+        # across towers. So .. we will just return the first tower's pointer to
+        # the Variable.
+        v = grad_and_vars[0][1]
+        grad_and_var = (grad, v)
+        average_grads.append(grad_and_var)
+    return average_grads
+
 
 class ExpRecurrentBroadcaster(OM.Broadcaster):
     """This is a broadcaster which follows the intensity function as defined by
@@ -96,6 +131,9 @@ class ExpRecurrentTrainer:
                               for idx, x in enumerate(sim_opts.create_other_sources())}
         self.src_embed_map[sim_opts.src_id] = 0
 
+        self.tf_dtype = tf.float32
+        self.np_dtype = np.float32
+
         self.q = 10.0
         self.batch_size = batch_size
         self.max_events = max_events
@@ -123,8 +161,8 @@ class ExpRecurrentTrainer:
                 self.tf_h = tf.get_variable(name="h", shape=(self.num_hidden_states, 1),
                                             initializer=tf.constant_initializer(init_h))
                 self.tf_b_idx = tf.placeholder(name="b_idx", shape=1, dtype=tf.int32)
-                self.tf_t_delta = tf.placeholder(name="t_delta", shape=1, dtype=tf.float32)
-                self.tf_rank = tf.placeholder(name="rank", shape=1, dtype=tf.float32)
+                self.tf_t_delta = tf.placeholder(name="t_delta", shape=1, dtype=self.tf_dtype)
+                self.tf_rank = tf.placeholder(name="rank", shape=1, dtype=self.tf_dtype)
 
                 self.tf_h_next = tf.nn.tanh(
                     tf.transpose(
@@ -146,7 +184,7 @@ class ExpRecurrentTrainer:
                                              initializer=tf.constant_initializer(vt))
                 self.tf_wt = tf.get_variable(name="wt", shape=wt.shape,
                                              initializer=tf.constant_initializer(wt))
-                # self.tf_t_delta = tf.placeholder(name="t_delta", shape=1, dtype=tf.float32)
+                # self.tf_t_delta = tf.placeholder(name="t_delta", shape=1, dtype=self.tf_dtype)
                 # self.tf_u_t = tf.exp(
                 #     tf.tensordot(self.tf_vt, self.tf_h, axes=1) +
                 #     self.tf_t_delta * self.tf_wt +
@@ -159,36 +197,36 @@ class ExpRecurrentTrainer:
             with tf.variable_scope("training"):
                 self.tf_batch_rewards = tf.placeholder(name="rewards",
                                                        shape=(batch_size, 1),
-                                                       dtype=tf.float32)
+                                                       dtype=self.tf_dtype)
                 self.tf_batch_t_deltas = tf.placeholder(name="t_deltas",
                                                         shape=(batch_size, max_events),
-                                                        dtype=tf.float32)
+                                                        dtype=self.tf_dtype)
                 self.tf_batch_b_idxes = tf.placeholder(name="b_idxes",
                                                        shape=(batch_size, max_events),
                                                        dtype=tf.int32)
                 self.tf_batch_ranks = tf.placeholder(name="ranks",
                                                      shape=(batch_size, max_events),
-                                                     dtype=tf.float32)
+                                                     dtype=self.tf_dtype)
                 self.tf_batch_seq_len = tf.placeholder(name="seq_len",
                                                        shape=(batch_size, 1),
                                                        dtype=tf.int32)
                 self.tf_batch_last_interval = tf.placeholder(name="last_interval",
                                                              shape=batch_size,
-                                                             dtype=tf.float32)
+                                                             dtype=self.tf_dtype)
 
                 self.tf_batch_init_h = tf_batch_h_t = tf.zeros(name="init_h",
                                                                shape=(batch_size, self.num_hidden_states),
-                                                               dtype=tf.float32)
+                                                               dtype=self.tf_dtype)
 
                 self.h_states = []
                 self.LL_log_terms = []
                 self.LL_int_terms = []
                 self.loss_terms = []
 
-                # self.LL = tf.zeros(name="log_likelihood", dtype=tf.float32, shape=(batch_size))
-                # self.loss = tf.zeros(name="loss", dtype=tf.float32, shape=(batch_size))
+                # self.LL = tf.zeros(name="log_likelihood", dtype=self.tf_dtype, shape=(batch_size))
+                # self.loss = tf.zeros(name="loss", dtype=self.tf_dtype, shape=(batch_size))
 
-                t_0 = tf.zeros(name="event_time", shape=batch_size, dtype=tf.float32)
+                t_0 = tf.zeros(name="event_time", shape=batch_size, dtype=self.tf_dtype)
 
                 def batch_u_theta(batch_t_deltas):
                     return tf.exp(
@@ -215,13 +253,13 @@ class ExpRecurrentTrainer:
                                       self.tf_Wt, transpose_b=True) +
                             tf.tile(tf.transpose(self.tf_Bh), [batch_size, 1])
                         ),
-                        tf.zeros(dtype=tf.float32, shape=(batch_size, self.num_hidden_states))
+                        tf.zeros(dtype=self.tf_dtype, shape=(batch_size, self.num_hidden_states))
                         # The gradient of a constant w.r.t. a variable is None or 0
                     )
                     tf_batch_u_theta = tf.where(
                         evt_idx <= self.tf_batch_seq_len,
                         batch_u_theta(self.tf_batch_t_deltas[:, evt_idx]),
-                        tf.zeros(dtype=tf.float32, shape=(batch_size, 1))
+                        tf.zeros(dtype=self.tf_dtype, shape=(batch_size, 1))
                     )
 
                     self.h_states.append(tf_batch_h_t)
@@ -230,8 +268,8 @@ class ExpRecurrentTrainer:
                         tf.where(
                             tf.equal(self.tf_batch_b_idxes[:, evt_idx], sim_opts.src_id),
                             tf.squeeze(tf.log(tf_batch_u_theta)),
-                            tf.zeros(dtype=tf.float32, shape=batch_size)),
-                        tf.zeros(dtype=tf.float32, shape=batch_size)))
+                            tf.zeros(dtype=self.tf_dtype, shape=batch_size)),
+                        tf.zeros(dtype=self.tf_dtype, shape=batch_size)))
 
                     self.LL_int_terms.append(tf.where(
                         tf.squeeze(evt_idx <= self.tf_batch_seq_len),
@@ -239,7 +277,7 @@ class ExpRecurrentTrainer:
                             batch_u_theta(t_0) -
                             tf_batch_u_theta
                         ),
-                        tf.zeros(dtype=tf.float32, shape=batch_size)))
+                        tf.zeros(dtype=self.tf_dtype, shape=batch_size)))
 
                     self.loss_terms.append(tf.where(
                         tf.squeeze(evt_idx <= self.tf_batch_seq_len),
@@ -247,7 +285,7 @@ class ExpRecurrentTrainer:
                             tf.square(batch_u_theta(t_0)) -
                             tf.square(tf_batch_u_theta)
                         ),
-                        tf.zeros(dtype=tf.float32, shape=(batch_size))))
+                        tf.zeros(dtype=self.tf_dtype, shape=(batch_size))))
 
         self.LL = tf.add_n(self.LL_log_terms) + tf.add_n(self.LL_log_terms)
         self.loss = tf.add_n(self.loss_terms)
@@ -269,62 +307,34 @@ class ExpRecurrentTrainer:
 
         # The gradients are added over the batch if made into a single call.
         # TODO: Perhaps there is a faster way of calculating these gradients?
-        self.LL_grads = {x: [tf.gradients(y, x) for y in tf.split(self.LL, self.batch_size)] for x in self.all_tf_vars}
-        self.loss_grads = {x: [tf.gradients(y, x) for y in tf.split(self.loss, self.batch_size)] for x in self.all_tf_vars}
+        self.LL_grads = {x: [tf.gradients(y, x)
+                             for y in tf.split(self.LL, self.batch_size)]
+                         for x in self.all_tf_vars}
+        self.loss_grads = {x: [tf.gradients(y, x)
+                               for y in tf.split(self.loss, self.batch_size)]
+                           for x in self.all_tf_vars}
 
-        # sim_feed_dict = {
-        #     self.tf_Wm: Wm,
-        #     self.tf_Wh: Wh,
-        #     self.tf_Wt: Wt,
-        #     self.tf_Bh: Bh,
+        # Attempt to calculate the gradient within Tensorflow for the entire
+        # batch, without moving to the CPU.
+        self.tower_gradients = [
+            [(
+                # TODO: This looks horribly inefficient and should be replaced by
+                # matrix multiplication soon.
+                (tf.gather(self.tf_batch_rewards, idx) + tf.gather(self.loss, idx)) * self.LL_grads[x][idx][0] +
+                self.loss_grads[x][idx][0],
+                x
+             )
+             for x in self.all_tf_vars]
+            for idx in range(self.batch_size)
+        ]
+        self.avg_gradient = average_gradients(self.tower_gradients)
 
-        #     self.tf_bt: bt,
-        #     self.tf_vt: vt,
-        #     self.tf_wt: wt,
-        # }
+        self.opt = tf.train.GradientDescentOptimizer(learning_rate=0.01)
+        self.sgd_op = self.opt.apply_gradients(self.avg_gradient)
 
         self.sim_opts = sim_opts
         self.src_id = sim_opts.src_id
         self.sess = sess
-
-    def get_batch_grad(self, batch):
-        """Returns the true gradient, given a feed dictionary generated by get_feed_dict."""
-        feed_dict = self.get_feed_dict(batch)
-        batch_rewards = [self.reward_fn(x) for x in batch]
-
-        # The gradients are already summed over the batch dimension.
-        LL_grads, losses, loss_grads = self.sess.run([self.LL_grads, self.loss, self.loss_grads],
-                                                     feed_dict=feed_dict)
-
-        true_grads = []
-        for batch_idx in range(len(batch)):
-            reward = batch_rewards[batch_idx]
-            loss = losses[batch_idx]
-            # TODO: Is there a better way of working with IndexesSlicedValue
-            # then converting it to a dense numpy array? Probably not.
-            batch_grad = {}
-            for x in self.all_tf_vars:
-                LL_grad = LL_grads[x][batch_idx][0]
-
-                if hasattr(LL_grad, 'dense_shape'):
-                    np_LL_grad = np.zeros(LL_grad.dense_shape)
-                    np_LL_grad[LL_grad.indices] = LL_grad.values
-                else:
-                    np_LL_grad = LL_grad
-
-                loss_grad = loss_grads[x][batch_idx][0]
-
-                if hasattr(loss_grad, 'dense_shape'):
-                    np_loss_grad = np.zeros(loss_grad.dense_shape)
-                    np_loss_grad[loss_grad.indices] = loss_grad.values
-                else:
-                    np_loss_grad = loss_grad
-
-                batch_grad[x] = (reward + loss) * np_LL_grad + np_loss_grad
-
-            true_grads.append(batch_grad)
-
-        return true_grads
 
     def initialize(self, finalize=True):
         """Initialize the graph."""
@@ -397,23 +407,48 @@ class ExpRecurrentTrainer:
             self.tf_batch_last_interval: batch_last_interval,
         }
 
-    def calc_grad(self, df):
-        """Calculate the gradient with respect to a certain run."""
-        # 1. Keep updating the u_{\theta}(t) in the tensorflow graph starting from
-        #    t = 0 with each event and calculating the gradient.
-        # 2. Finally, sum together the gradient calculated for the complete
-        #    sequence.
+    def get_batch_grad(self, batch):
+        """Returns the true gradient, given a feed dictionary generated by get_feed_dict."""
+        feed_dict = self.get_feed_dict(batch)
+        batch_rewards = [self.reward_fn(x) for x in batch]
 
-        # Actually, we can calculate the gradient analytically in this case.
-        # Not quite: we can integrate analytically, but differentiation is
-        # still a little tricky because of the hidden state.
-        R_tau = self.reward_fn(df, src_id=self.src_id)
+        # The gradients are already summed over the batch dimension.
+        LL_grads, losses, loss_grads = self.sess.run([self.LL_grads, self.loss, self.loss_grads],
+                                                     feed_dict=feed_dict)
 
-        # Loop over the events.
-        unique_events = df.groupby('event_id').first()
-        for t_delta, src_id in unique_events[['time_delta', 'src_id']].values:
-            # TODO
-            pass
+        true_grads = []
+        for batch_idx in range(len(batch)):
+            reward = batch_rewards[batch_idx]
+            loss = losses[batch_idx]
+            # TODO: Is there a better way of working with IndexesSlicedValue
+            # then converting it to a dense numpy array? Probably not.
+            batch_grad = {}
+            for x in self.all_tf_vars:
+                LL_grad = LL_grads[x][batch_idx][0]
+
+                if hasattr(LL_grad, 'dense_shape'):
+                    np_LL_grad = np.zeros(LL_grad.dense_shape, dtype=self.np_dtype)
+                    np_LL_grad[LL_grad.indices] = LL_grad.values
+                else:
+                    np_LL_grad = LL_grad
+
+                loss_grad = loss_grads[x][batch_idx][0]
+
+                if hasattr(loss_grad, 'dense_shape'):
+                    np_loss_grad = np.zeros(loss_grad.dense_shape)
+                    np_loss_grad[loss_grad.indices] = loss_grad.values
+                else:
+                    np_loss_grad = loss_grad
+
+                batch_grad[x] = (reward + loss) * np_LL_grad + np_loss_grad
+
+            true_grads.append(batch_grad)
+
+        return true_grads
+
+    def train(self, sim_batch):
+        """Run one SGD op given a batch of simulation."""
+
 
 
 ###################################
