@@ -4,6 +4,7 @@ import redqueen.utils as RU
 import tensorflow as tf
 import decorated_options as Deco
 from exp_sampler import ExpCDFSampler
+# import multiprocessing as MP
 
 def average_gradients(tower_grads):
     """Calculate the average gradient for each shared variable across all towers.
@@ -61,7 +62,7 @@ class ExpRecurrentBroadcaster(OM.Broadcaster):
 
         self.trainer = trainer
 
-        params = Deco.Options(**self.trainer.sess.run({
+        self.params = Deco.Options(**self.trainer.sess.run({
             'Wm': trainer.tf_Wm,
             'Wh': trainer.tf_Wh,
             'Bh': trainer.tf_Bh,
@@ -74,9 +75,9 @@ class ExpRecurrentBroadcaster(OM.Broadcaster):
             'init_h': trainer.tf_h
         }))
 
-        self.cur_h = params.init_h
+        self.cur_h = self.params.init_h
 
-        self.exp_sampler = ExpCDFSampler(_opts=params,
+        self.exp_sampler = ExpCDFSampler(_opts=self.params,
                                          t_min=t_min,
                                          seed=seed + 1)
 
@@ -97,6 +98,7 @@ class ExpRecurrentBroadcaster(OM.Broadcaster):
     def get_next_interval(self, event):
         if not self.init:
             self.init = True
+            self.state.set_track_src_id(self.src_id)
             # Nothing special to do for the first event.
 
         self.state.apply_event(event)
@@ -320,8 +322,8 @@ class ExpRecurrentTrainer:
             [(
                 # TODO: This looks horribly inefficient and should be replaced by
                 # matrix multiplication soon.
-                (tf.gather(self.tf_batch_rewards, idx) + tf.gather(self.loss, idx)) * self.LL_grads[x][idx][0] +
-                self.loss_grads[x][idx][0],
+                -1 * ((tf.gather(self.tf_batch_rewards, idx) + tf.gather(self.loss, idx)) * self.LL_grads[x][idx][0] +
+                      self.loss_grads[x][idx][0]),
                 x
              )
              for x in self.all_tf_vars]
@@ -329,7 +331,7 @@ class ExpRecurrentTrainer:
         ]
         self.avg_gradient = average_gradients(self.tower_gradients)
 
-        self.opt = tf.train.GradientDescentOptimizer(learning_rate=0.01)
+        self.opt = tf.train.GradientDescentOptimizer(learning_rate=0.001)
         self.sgd_op = self.opt.apply_gradients(self.avg_gradient)
 
         self.sim_opts = sim_opts
@@ -446,9 +448,29 @@ class ExpRecurrentTrainer:
 
         return true_grads
 
-    def train(self, sim_batch):
+    def train_many(self, num_iters, init_seed=42):
         """Run one SGD op given a batch of simulation."""
+        # TODO: First determine whether we are applying the gradients in the
+        # correct direction.
+        seed_start = init_seed
 
+        # TODO: Run the simulations in parallel. Will need to somehow create
+        # exp-broadcaster shareable.
+        # with MP.Pool() as pool:
+
+        for epoch in range(num_iters):
+            batch = []
+            for seed in range(seed_start, seed_start + self.batch_size):
+                batch.append(self.run_sim(seed))
+
+            f_d = self.get_feed_dict(batch)
+            LL, loss, _ = self.sess.run([self.LL, self.loss, self.sgd_op],
+                                        feed_dict=f_d)
+            mean_LL = np.mean(LL)
+            mean_loss = np.mean(loss)
+            mean_reward = mean_LL + mean_loss
+            print('Epoch {}, LL = {:.3f}, loss = {:.3f}, reward = {:.3f}'
+                  .format(epoch, mean_LL, mean_loss, mean_reward))
 
 
 ###################################
