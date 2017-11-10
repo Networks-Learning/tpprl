@@ -1,10 +1,15 @@
 import numpy as np
+import os
 import redqueen.opt_model as OM
 import redqueen.utils as RU
 import tensorflow as tf
 import decorated_options as Deco
 from exp_sampler import ExpCDFSampler
 # import multiprocessing as MP
+
+
+SAVE_DIR = 'tpprl-log'
+
 
 def average_gradients(tower_grads):
     """Calculate the average gradient for each shared variable across all towers.
@@ -450,6 +455,8 @@ class ExpRecurrentTrainer:
 
     def train_many(self, num_iters, init_seed=42):
         """Run one SGD op given a batch of simulation."""
+        saver = tf.train.Saver(tf.global_variables())
+
         # TODO: First determine whether we are applying the gradients in the
         # correct direction.
         seed_start = init_seed
@@ -458,19 +465,52 @@ class ExpRecurrentTrainer:
         # exp-broadcaster shareable.
         # with MP.Pool() as pool:
 
+        train_op = self.sgd_op if not clipping else self.sgd_clipped_op
+
         for epoch in range(num_iters):
             batch = []
-            for seed in range(seed_start, seed_start + self.batch_size):
+            seed_end = seed_start + self.batch_size
+
+            for seed in range(seed_start, seed_end):
                 batch.append(self.run_sim(seed))
 
             f_d = self.get_feed_dict(batch)
-            LL, loss, _ = self.sess.run([self.LL, self.loss, self.sgd_op],
-                                        feed_dict=f_d)
+            reward, LL, loss, grad_norm, _ = \
+                self.sess.run([self.tf_batch_rewards, self.LL, self.loss,
+                               self.grad_norm, train_op],
+                              feed_dict=f_d)
+
             mean_LL = np.mean(LL)
             mean_loss = np.mean(loss)
-            mean_reward = mean_LL + mean_loss
+            mean_reward = np.mean(reward)
+
             print('Epoch {}, LL = {:.3f}, loss = {:.3f}, reward = {:.3f}'
-                  .format(epoch, mean_LL, mean_loss, mean_reward))
+                  ', CTG = {:.3f}, seeds = ({} -- {}), grad_norm = {:.3f}'
+                  .format(epoch, mean_LL, mean_loss, -mean_reward,
+                          mean_reward + mean_loss,
+                          seed_start, seed_end - 1, grad_norm))
+
+            chkpt_file = os.path.join(SAVE_DIR, 'tpprl.ckpt')
+            saver.save(self.sess, chkpt_file, global_step=epoch)
+
+            # Ready for the next epoch.
+            seed_start = seed_end
+
+    def restore(self, epoch_to_recover=None):
+        """Restores the model from a saved checkpoint."""
+        saver = tf.train.Saver(tf.global_variables())
+        chkpt = tf.train.get_checkpoint_state(SAVE_DIR)
+
+        if epoch_to_recover is not None:
+            suffix = '-{}'.format(epoch_to_recover)
+            file = [x for x in chkpt.all_model_checkpoint_paths
+                    if x.endswith(suffix)]
+            if len(file) < 1:
+                raise FileNotFoundError('Epoch {} not found.'
+                                        .format(epoch_to_recover))
+            saver.restore(self.sess, file[0])
+        else:
+            saver.restore(self.sess, chkpt.model_checkpoint_path)
 
 
 ###################################
@@ -834,3 +874,6 @@ class ExpPredTrainer:
         for t_delta, src_id in unique_events[['time_delta', 'src_id']].values:
             # TODO
             pass
+
+
+os.makedirs(SAVE_DIR, exist_ok=True)
