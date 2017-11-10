@@ -132,7 +132,8 @@ class ExpRecurrentTrainer:
 
     @Deco.optioned()
     def __init__(self, Wm, Wh, Wt, Wr, Bh, vt, wt, bt, init_h, sess, sim_opts,
-                 scope=None, t_min=0, batch_size=16, max_events=100):
+                 scope=None, t_min=0, batch_size=16, max_events=100,
+                 learning_rate=0.01, clip_norm=1.0):
         """Initialize the trainer with the policy parameters."""
         self.src_embed_map = {x.src_id: idx + 1
                               for idx, x in enumerate(sim_opts.create_other_sources())}
@@ -140,6 +141,9 @@ class ExpRecurrentTrainer:
 
         self.tf_dtype = tf.float32
         self.np_dtype = np.float32
+
+        self.learning_rate = learning_rate
+        self.clip_norm = clip_norm
 
         self.q = 10.0
         self.batch_size = batch_size
@@ -321,23 +325,35 @@ class ExpRecurrentTrainer:
                                for y in tf.split(self.loss, self.batch_size)]
                            for x in self.all_tf_vars}
 
-        # Attempt to calculate the gradient within Tensorflow for the entire
+        # Attempt to calculate the gradient within TensorFlow for the entire
         # batch, without moving to the CPU.
         self.tower_gradients = [
             [(
-                # TODO: This looks horribly inefficient and should be replaced by
-                # matrix multiplication soon.
-                -1 * ((tf.gather(self.tf_batch_rewards, idx) + tf.gather(self.loss, idx)) * self.LL_grads[x][idx][0] +
+                # TODO: This looks horribly inefficient and should be replaced
+                # by matrix multiplication soon.
+                -1 * ((tf.gather(self.tf_batch_rewards, idx) +
+                       tf.gather(self.loss, idx)) *
+                      self.LL_grads[x][idx][0] +
                       self.loss_grads[x][idx][0]),
                 x
              )
              for x in self.all_tf_vars]
             for idx in range(self.batch_size)
         ]
-        self.avg_gradient = average_gradients(self.tower_gradients)
 
-        self.opt = tf.train.GradientDescentOptimizer(learning_rate=0.001)
+        self.avg_gradient = average_gradients(self.tower_gradients)
+        self.clipped_avg_gradients, self.grad_norm = \
+            tf.clip_by_global_norm([grad for grad, _ in self.avg_gradient],
+                                   clip_norm=self.clip_norm)
+
+        self.clipped_avg_gradient = list(zip(
+            self.clipped_avg_gradients,
+            [var for _, var in self.avg_gradient]
+        ))
+
+        self.opt = tf.train.GradientDescentOptimizer(learning_rate=self.learning_rate)
         self.sgd_op = self.opt.apply_gradients(self.avg_gradient)
+        self.sgd_clipped_op = self.opt.apply_gradients(self.clipped_avg_gradient)
 
         self.sim_opts = sim_opts
         self.src_id = sim_opts.src_id
@@ -364,12 +380,17 @@ class ExpRecurrentTrainer:
         exp_b = self._create_exp_broadcaster(seed=seed * 3)
 
         mgr = run_sim_opts.create_manager_with_broadcaster(exp_b)
-        mgr.run_dynamic()
+        # The +1 is to allow us to detect when the number of events is
+        # too large to fit in our buffer.
+        # Otherwise, we always assume that the sequence didn't produce another
+        # event till the end of the time (causing overflows in the survival terms).
+        mgr.run_dynamic(max_events=self.max_events + 1)
         return mgr.get_state().get_dataframe()
 
     def reward_fn(self, df):
         """Calculate the reward for a given trajectory."""
-        rank_in_tau = RU.rank_of_src_in_df(df=df, src_id=self.src_id).mean(axis=1)
+        rank_in_tau = RU.rank_of_src_in_df(df=df.iloc[:self.max_events,],
+                                           src_id=self.src_id).mean(axis=1)
         rank_dt = np.diff(np.concatenate([rank_in_tau.index.values,
                                           [self.sim_opts.end_time]]))
         return np.sum((rank_in_tau ** 2) * rank_dt)
@@ -453,7 +474,7 @@ class ExpRecurrentTrainer:
 
         return true_grads
 
-    def train_many(self, num_iters, init_seed=42):
+    def train_many(self, num_iters, init_seed=42, clipping=True):
         """Run one SGD op given a batch of simulation."""
         saver = tf.train.Saver(tf.global_variables())
 
