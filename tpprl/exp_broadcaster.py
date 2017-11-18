@@ -1,11 +1,20 @@
 import numpy as np
+import datetime as D
 import os
 import redqueen.opt_model as OM
 import redqueen.utils as RU
 import tensorflow as tf
 import decorated_options as Deco
-from exp_sampler import ExpCDFSampler
+import exp_sampler
 # import multiprocessing as MP
+
+
+def _now(raw=False):
+    """Return the time now in red color."""
+    base = '\x1b[31m[{}]\x1b[0m' if not raw else '{}'
+    return (base
+            .format(D.datetime.now()
+                    .isoformat(timespec='seconds')))
 
 
 SAVE_DIR = 'tpprl-log'
@@ -82,9 +91,9 @@ class ExpRecurrentBroadcaster(OM.Broadcaster):
 
         self.cur_h = self.params.init_h
 
-        self.exp_sampler = ExpCDFSampler(_opts=self.params,
-                                         t_min=t_min,
-                                         seed=seed + 1)
+        self.exp_sampler = exp_sampler.ExpCDFSampler(_opts=self.params,
+                                                     t_min=t_min,
+                                                     seed=seed + 1)
 
     def update_hidden_state(self, src_id, time_delta):
         """Returns the hidden state after a post by src_id and time delta."""
@@ -145,8 +154,10 @@ class ExpRecurrentTrainer:
         self.learning_rate = learning_rate
         self.clip_norm = clip_norm
 
-        self.q = 10.0
+        self.q = 100.0  # Reward is blown up by a factor of about 100
         self.batch_size = batch_size
+        # self.tf_batch_size = batch_size
+        self.tf_batch_size = None
         self.max_events = max_events
         self.num_hidden_states = init_h.shape[0]
 
@@ -207,26 +218,29 @@ class ExpRecurrentTrainer:
             # the gradients for a given given batch of simulations.
             with tf.variable_scope("training"):
                 self.tf_batch_rewards = tf.placeholder(name="rewards",
-                                                       shape=(batch_size, 1),
+                                                       shape=(self.tf_batch_size, 1),
                                                        dtype=self.tf_dtype)
                 self.tf_batch_t_deltas = tf.placeholder(name="t_deltas",
-                                                        shape=(batch_size, max_events),
+                                                        shape=(self.tf_batch_size, max_events),
                                                         dtype=self.tf_dtype)
                 self.tf_batch_b_idxes = tf.placeholder(name="b_idxes",
-                                                       shape=(batch_size, max_events),
+                                                       shape=(self.tf_batch_size, max_events),
                                                        dtype=tf.int32)
                 self.tf_batch_ranks = tf.placeholder(name="ranks",
-                                                     shape=(batch_size, max_events),
+                                                     shape=(self.tf_batch_size, max_events),
                                                      dtype=self.tf_dtype)
                 self.tf_batch_seq_len = tf.placeholder(name="seq_len",
-                                                       shape=(batch_size, 1),
+                                                       shape=(self.tf_batch_size, 1),
                                                        dtype=tf.int32)
                 self.tf_batch_last_interval = tf.placeholder(name="last_interval",
-                                                             shape=batch_size,
+                                                             shape=self.tf_batch_size,
                                                              dtype=self.tf_dtype)
 
+                # Inferred batch size
+                inf_batch_size = tf.shape(self.tf_batch_b_idxes)[0]
+
                 self.tf_batch_init_h = tf_batch_h_t = tf.zeros(name="init_h",
-                                                               shape=(batch_size, self.num_hidden_states),
+                                                               shape=(inf_batch_size, self.num_hidden_states),
                                                                dtype=self.tf_dtype)
 
                 self.h_states = []
@@ -234,10 +248,10 @@ class ExpRecurrentTrainer:
                 self.LL_int_terms = []
                 self.loss_terms = []
 
-                # self.LL = tf.zeros(name="log_likelihood", dtype=self.tf_dtype, shape=(batch_size))
-                # self.loss = tf.zeros(name="loss", dtype=self.tf_dtype, shape=(batch_size))
+                # self.LL = tf.zeros(name="log_likelihood", dtype=self.tf_dtype, shape=(self.tf_batch_size))
+                # self.loss = tf.zeros(name="loss", dtype=self.tf_dtype, shape=(self.tf_batch_size))
 
-                t_0 = tf.zeros(name="event_time", shape=batch_size, dtype=self.tf_dtype)
+                t_0 = tf.zeros(name="event_time", shape=(inf_batch_size,), dtype=self.tf_dtype)
 
                 def batch_u_theta(batch_t_deltas):
                     return tf.exp(
@@ -247,7 +261,8 @@ class ExpRecurrentTrainer:
                     )
 
                 # TODO: Convert this to a tf.while_loop, perhaps.
-                # The performance benefit is debatable.
+                # The performance benefit is debatable, but the graph may be constructed faster.
+                # TODO: Another idea is to convert it to use dynamic_rnn.
                 for evt_idx in range(max_events):
                     # Perhaps this can be melded into the old definition of tf_h_next
                     # above by using the batch size dimension as None?
@@ -262,15 +277,15 @@ class ExpRecurrentTrainer:
                                       self.tf_Wr, transpose_b=True) +
                             tf.matmul(tf.expand_dims(self.tf_batch_t_deltas[:, evt_idx], 1),
                                       self.tf_Wt, transpose_b=True) +
-                            tf.tile(tf.transpose(self.tf_Bh), [batch_size, 1])
+                            tf.tile(tf.transpose(self.tf_Bh), [inf_batch_size, 1])
                         ),
-                        tf.zeros(dtype=self.tf_dtype, shape=(batch_size, self.num_hidden_states))
+                        tf.zeros(dtype=self.tf_dtype, shape=(inf_batch_size, self.num_hidden_states))
                         # The gradient of a constant w.r.t. a variable is None or 0
                     )
                     tf_batch_u_theta = tf.where(
                         evt_idx <= self.tf_batch_seq_len,
                         batch_u_theta(self.tf_batch_t_deltas[:, evt_idx]),
-                        tf.zeros(dtype=self.tf_dtype, shape=(batch_size, 1))
+                        tf.zeros(dtype=self.tf_dtype, shape=(inf_batch_size, 1))
                     )
 
                     self.h_states.append(tf_batch_h_t)
@@ -279,42 +294,41 @@ class ExpRecurrentTrainer:
                         tf.where(
                             tf.equal(self.tf_batch_b_idxes[:, evt_idx], sim_opts.src_id),
                             tf.squeeze(tf.log(tf_batch_u_theta)),
-                            tf.zeros(dtype=self.tf_dtype, shape=batch_size)),
-                        tf.zeros(dtype=self.tf_dtype, shape=batch_size)))
+                            tf.zeros(dtype=self.tf_dtype, shape=(inf_batch_size,))),
+                        tf.zeros(dtype=self.tf_dtype, shape=(inf_batch_size,))))
 
                     self.LL_int_terms.append(tf.where(
                         tf.squeeze(evt_idx <= self.tf_batch_seq_len),
-                        - (1 / self.tf_wt) * tf.squeeze(
-                            batch_u_theta(t_0) -
-                            tf_batch_u_theta
+                        (1 / self.tf_wt) * tf.squeeze(
+                            tf_batch_u_theta -
+                            batch_u_theta(t_0)
                         ),
-                        tf.zeros(dtype=self.tf_dtype, shape=batch_size)))
+                        tf.zeros(dtype=self.tf_dtype, shape=(inf_batch_size,))))
 
                     self.loss_terms.append(tf.where(
                         tf.squeeze(evt_idx <= self.tf_batch_seq_len),
-                        -(1 / (2 * self.tf_wt)) * tf.squeeze(
-                            tf.square(batch_u_theta(t_0)) -
-                            tf.square(tf_batch_u_theta)
+                        (1 / (2 * self.tf_wt)) * tf.squeeze(
+                            tf.square(tf_batch_u_theta) -
+                            tf.square(batch_u_theta(t_0))
                         ),
-                        tf.zeros(dtype=self.tf_dtype, shape=(batch_size))))
+                        tf.zeros(dtype=self.tf_dtype, shape=(inf_batch_size,))))
 
-        self.LL = tf.add_n(self.LL_log_terms) + tf.add_n(self.LL_log_terms)
+        self.LL = tf.add_n(self.LL_log_terms) - tf.add_n(self.LL_int_terms)
         self.loss = tf.add_n(self.loss_terms)
 
         # Here, outside the loop, add the survival term for the batch to
         # both the loss and to the LL.
-        self.LL += (1 / self.tf_wt) * tf.squeeze(
-            batch_u_theta(t_0) - batch_u_theta(self.tf_batch_last_interval)
+        self.LL -= (1 / self.tf_wt) * tf.squeeze(
+            batch_u_theta(self.tf_batch_last_interval) - batch_u_theta(t_0)
         )
-        self.loss += - (1 / (2 * self.tf_wt)) * tf.squeeze(
-            tf.square(batch_u_theta(t_0)) -
-            tf.square(batch_u_theta(self.tf_batch_last_interval))
+        self.loss += (1 / (2 * self.tf_wt)) * tf.squeeze(
+            tf.square(batch_u_theta(self.tf_batch_last_interval)) -
+            tf.square(batch_u_theta(t_0))
         )
         self.loss *= self.q / 2
 
         self.all_tf_vars = [self.tf_Wh, self.tf_Wm, self.tf_Wt, self.tf_Bh,
-                            self.tf_Wr,
-                            self.tf_bt, self.tf_vt, self.tf_wt]
+                            self.tf_Wr, self.tf_bt, self.tf_vt, self.tf_wt]
 
         # The gradients are added over the batch if made into a single call.
         # TODO: Perhaps there is a faster way of calculating these gradients?
@@ -328,16 +342,11 @@ class ExpRecurrentTrainer:
         # Attempt to calculate the gradient within TensorFlow for the entire
         # batch, without moving to the CPU.
         self.tower_gradients = [
-            [(
-                # TODO: This looks horribly inefficient and should be replaced
-                # by matrix multiplication soon.
-                -1 * ((tf.gather(self.tf_batch_rewards, idx) +
-                       tf.gather(self.loss, idx)) *
-                      self.LL_grads[x][idx][0] +
-                      self.loss_grads[x][idx][0]),
-                x
-             )
-             for x in self.all_tf_vars]
+            # TODO: This looks horribly inefficient and should be replaced
+            # by matrix multiplication soon.
+            [(((tf.gather(self.tf_batch_rewards, idx) + tf.gather(self.loss, idx)) * self.LL_grads[x][idx][0] +
+               self.loss_grads[x][idx][0]),
+               x) for x in self.all_tf_vars]
             for idx in range(self.batch_size)
         ]
 
@@ -389,10 +398,12 @@ class ExpRecurrentTrainer:
 
     def reward_fn(self, df):
         """Calculate the reward for a given trajectory."""
-        rank_in_tau = RU.rank_of_src_in_df(df=df.iloc[:self.max_events,],
+        rank_in_tau = RU.rank_of_src_in_df(df=df.iloc[:self.max_events, ],
                                            src_id=self.src_id).mean(axis=1)
+
+        last_time = self.sim_opts.end_time if df.shape[0] <= self.max_events else df['t'].iloc[self.max_events]
         rank_dt = np.diff(np.concatenate([rank_in_tau.index.values,
-                                          [self.sim_opts.end_time]]))
+                                          [last_time]]))
         return np.sum((rank_in_tau ** 2) * rank_dt)
 
     def get_feed_dict(self, batch_df):
@@ -505,10 +516,10 @@ class ExpRecurrentTrainer:
             mean_loss = np.mean(loss)
             mean_reward = np.mean(reward)
 
-            print('Epoch {}, LL = {:.3f}, loss = {:.3f}, reward = {:.3f}'
-                  ', CTG = {:.3f}, seeds = ({} -- {}), grad_norm = {:.3f}'
-                  .format(epoch, mean_LL, mean_loss, -mean_reward,
-                          mean_reward + mean_loss,
+            print('{} Run {}, LL {:.3f}, loss {:.3f}, r^2(t) {:.3f}'
+                  ', CTG {:.3f}, seeds {}--{}, grad_norm {:.3f}'
+                  .format(_now(), epoch, mean_LL, mean_loss,
+                          mean_reward, mean_reward + mean_loss,
                           seed_start, seed_end - 1, grad_norm))
 
             chkpt_file = os.path.join(SAVE_DIR, 'tpprl.ckpt')
@@ -569,9 +580,9 @@ class ExpPredBroadcaster(OM.Broadcaster):
 
         self.cur_h = params.init_h
 
-        self.exp_sampler = ExpCDFSampler(_opts=params,
-                                         t_min=t_min,
-                                         seed=seed + 1)
+        self.exp_sampler = exp_sampler.ExpCDFSampler(_opts=params,
+                                                     t_min=t_min,
+                                                     seed=seed + 1)
 
     def update_hidden_state(self, src_id, time_delta):
         """Returns the hidden state after a post by src_id and time delta."""
