@@ -360,7 +360,8 @@ class ExpRecurrentTrainer:
             [var for _, var in self.avg_gradient]
         ))
 
-        self.opt = tf.train.GradientDescentOptimizer(learning_rate=self.learning_rate)
+        # self.opt = tf.train.GradientDescentOptimizer(learning_rate=self.learning_rate)
+        self.opt = tf.train.AdamOptimizer(learning_rate=self.learning_rate)
         self.sgd_op = self.opt.apply_gradients(self.avg_gradient)
         self.sgd_clipped_op = self.opt.apply_gradients(self.clipped_avg_gradient)
 
