@@ -6,15 +6,13 @@ import redqueen.utils as RU
 import tensorflow as tf
 import decorated_options as Deco
 import exp_sampler
+
+from utils import variable_summaries, _now, average_gradients
 # import multiprocessing as MP
 
 
-def _now(raw=False):
-    """Return the time now in red color."""
-    base = '\x1b[31m[{}]\x1b[0m' if not raw else '{}'
-    return (base
-            .format(D.datetime.now()
-                    .isoformat(timespec='seconds')))
+SAVE_DIR = 'tpprl-log'
+os.makedirs(SAVE_DIR, exist_ok=True)
 
 
 SAVE_DIR = 'tpprl-log'
@@ -77,11 +75,11 @@ class ExpRecurrentBroadcaster(OM.Broadcaster):
         self.trainer = trainer
 
         self.params = Deco.Options(**self.trainer.sess.run({
-            'Wm': trainer.tf_Wm,
-            'Wh': trainer.tf_Wh,
-            'Bh': trainer.tf_Bh,
-            'Wt': trainer.tf_Wt,
-            'Wr': trainer.tf_Wr,
+            # 'Wm': trainer.tf_Wm,
+            # 'Wh': trainer.tf_Wh,
+            # 'Bh': trainer.tf_Bh,
+            # 'Wt': trainer.tf_Wt,
+            # 'Wr': trainer.tf_Wr,
 
             'wt': trainer.tf_wt,
             'vt': trainer.tf_vt,
@@ -139,6 +137,8 @@ OM.SimOpts.registerSource('ExpRecurrentBroadcaster', ExpRecurrentBroadcaster)
 
 
 class TPPRSigmoidCell(tf.contrib.rnn.RNNCell):
+    """u(t) = k * sigmoid(vt * ht + wt * dt + bt)"""
+
     def __init__(self, hidden_state_size, output_size, src_id, tf_dtype,
                  Wm, Wr, Wh, Wt, Bh,
                  wt, vt, bt, k):
@@ -200,7 +200,7 @@ class TPPRSigmoidCell(tf.contrib.rnn.RNNCell):
         # u_theta_0 = self.u_theta(t_0, name='u_theta_0')
 
         LL_log = tf.where(
-            tf.equal(broadcaster_idx, self.src_id),
+            tf.equal(broadcaster_idx, 0),
             tf.squeeze(tf.log(u_theta), axis=-1),
             tf.zeros(dtype=self.tf_dtype, shape=(inf_batch_size,)),
             name='LL_log'
@@ -227,6 +227,8 @@ class TPPRSigmoidCell(tf.contrib.rnn.RNNCell):
 
 
 class TPPRExpCell(tf.contrib.rnn.RNNCell):
+    """u(t) = exp(vt * ht + wt * dt + bt)"""
+
     def __init__(self, hidden_state_size, output_size, src_id, tf_dtype,
                  Wm, Wr, Wh, Wt, Bh,
                  wt, vt, bt):
@@ -275,7 +277,7 @@ class TPPRExpCell(tf.contrib.rnn.RNNCell):
         u_theta_0 = self.u_theta(h_prev, t_0, name='u_theta_0')
 
         LL_log = tf.where(
-            tf.equal(broadcaster_idx, self.src_id),
+            tf.equal(broadcaster_idx, 0),
             tf.squeeze(tf.log(u_theta), axis=-1),
             tf.zeros(dtype=self.tf_dtype, shape=(inf_batch_size,))
         )
@@ -300,13 +302,55 @@ class TPPRExpCell(tf.contrib.rnn.RNNCell):
         return self._hidden_state_size
 
 
-class ExpRecurrentTrainer:
+def mk_def_exp_recurrent_trainer_opts(num_other_broadcasters, hidden_dims,
+                                      seed=42, **kwargs):
+    """Make default option set."""
+    RS  = np.random.RandomState(seed=seed)
 
+    def_exp_recurrent_trainer_opts = Deco.Options(
+        t_min=0,
+        scope=None,
+        with_dynamic_rnn=True,
+        decay_steps=100,
+        decay_rate=0.001,
+
+        Wh=RS.randn(hidden_dims, hidden_dims) * 0.1 + np.diag(np.ones(hidden_dims)),  # Careful initialization
+        Wm=RS.randn(num_other_broadcasters + 1, hidden_dims),
+        Wr=RS.randn(hidden_dims, 1),
+        Wt=RS.randn(hidden_dims, 1),
+        Bh=RS.randn(hidden_dims, 1),
+
+        vt=RS.randn(hidden_dims, 1),
+        wt=np.abs(RS.rand(1)) * -1,
+        bt=np.abs(RS.randn(1)),
+
+        init_h=RS.randn(hidden_dims),
+
+        max_events=5000,
+        batch_size=16,
+
+        learning_rate=.01,
+        clip_norm=1.0,
+
+        momentum=0.9,
+
+        summary_dir=None  # Expected: './tpprl.summary/train-{}/'.format(run)
+    )
+
+    def_exp_recurrent_trainer_opts.set(kwargs)
+    return def_exp_recurrent_trainer_opts
+
+
+class ExpRecurrentTrainer:
     @Deco.optioned()
     def __init__(self, Wm, Wh, Wt, Wr, Bh, vt, wt, bt, init_h, sess, sim_opts,
-                 scope=None, t_min=0, batch_size=16, max_events=100,
-                 learning_rate=0.01, clip_norm=1.0, with_dynamic_rnn=False):
+                 scope, t_min, batch_size, max_events,
+                 learning_rate, clip_norm, with_dynamic_rnn,
+                 summary_dir, decay_steps, decay_rate, momentum):
         """Initialize the trainer with the policy parameters."""
+
+        self.summary_dir = summary_dir
+
         self.src_embed_map = {x.src_id: idx + 1
                               for idx, x in enumerate(sim_opts.create_other_sources())}
         self.src_embed_map[sim_opts.src_id] = 0
@@ -315,11 +359,13 @@ class ExpRecurrentTrainer:
         self.np_dtype = np.float32
 
         self.learning_rate = learning_rate
+        self.decay_rate = decay_rate
+        self.decay_steps = decay_steps
         self.clip_norm = clip_norm
 
-        self.q = 100.0  # Reward is blown up by a factor of about 100
+        self.q = 100.0  # Loss is blown up by a factor of 100 / 2
         self.batch_size = batch_size
-        # self.tf_batch_size = batch_size
+
         self.tf_batch_size = None
         self.max_events = max_events
         self.num_hidden_states = init_h.shape[0]
@@ -455,7 +501,7 @@ class ExpRecurrentTrainer:
                         self.LL_log_terms.append(tf.where(
                             tf.squeeze(evt_idx < self.tf_batch_seq_len),
                             tf.where(
-                                tf.equal(self.tf_batch_b_idxes[:, evt_idx], sim_opts.src_id),
+                                tf.equal(self.tf_batch_b_idxes[:, evt_idx], 0),
                                 tf.squeeze(tf.log(tf_batch_u_theta)),
                                 tf.zeros(dtype=self.tf_dtype, shape=(inf_batch_size,))),
                             tf.zeros(dtype=self.tf_dtype, shape=(inf_batch_size,))))
@@ -553,14 +599,50 @@ class ExpRecurrentTrainer:
             [var for _, var in self.avg_gradient]
         ))
 
+        device_cpu = '/cpu:0'
+
         # self.opt = tf.train.GradientDescentOptimizer(learning_rate=self.learning_rate)
-        self.opt = tf.train.AdamOptimizer(learning_rate=self.learning_rate)
+        with tf.device(device_cpu):
+            # Global step needs to be on the CPU (Why?)
+            self.global_step = tf.Variable(0, name='global_step', trainable=False)
+
+        self.tf_learning_rate = tf.train.inverse_time_decay(
+            self.learning_rate,
+            global_step=self.global_step,
+            decay_steps=self.decay_steps,
+            decay_rate=self.decay_rate
+        )
+
+        self.opt = tf.train.AdamOptimizer(learning_rate=self.tf_learning_rate,
+                                          beta1=momentum)
         self.sgd_op = self.opt.apply_gradients(self.avg_gradient)
         self.sgd_clipped_op = self.opt.apply_gradients(self.clipped_avg_gradient)
 
         self.sim_opts = sim_opts
         self.src_id = sim_opts.src_id
         self.sess = sess
+
+        self.all_vars = [self.tf_Wt, self.tf_Wm, self.tf_Wh, self.tf_Wt,
+                         self.tf_Wr, self.tf_Bh, self.tf_bt, self.tf_vt]
+
+        with tf.device(device_cpu):
+            tf.contrib.training.add_gradients_summaries(self.avg_gradient)
+
+            for v in self.all_vars:
+                variable_summaries(v)
+
+            variable_summaries(self.loss, name='loss')
+            variable_summaries(self.LL, name='LL')
+            variable_summaries(self.loss_last, name='loss_last_term')
+            variable_summaries(self.LL_last, name='LL_last_term')
+            variable_summaries(self.h_states, name='hidden_states')
+            variable_summaries(self.LL_log_terms, name='LL_log_terms')
+            variable_summaries(self.LL_int_terms, name='LL_int_terms')
+            variable_summaries(self.loss_terms, name='loss_terms')
+            variable_summaries(tf.cast(self.tf_batch_seq_len, self.tf_dtype),
+                               name='batch_seq_len')
+
+            self.tf_merged_summaries = tf.summary.merge_all()
 
     def initialize(self, finalize=True):
         """Initialize the graph."""
@@ -679,13 +761,20 @@ class ExpRecurrentTrainer:
 
         return true_grads
 
-    def train_many(self, num_iters, init_seed=42, clipping=True):
+    def train_many(self, num_iters, init_seed=42,
+                   clipping=True, with_summaries=False):
         """Run one SGD op given a batch of simulation."""
         saver = tf.train.Saver(tf.global_variables())
 
         # TODO: First determine whether we are applying the gradients in the
         # correct direction.
         seed_start = init_seed
+
+        if with_summaries:
+            assert self.summary_dir is not None
+            os.makedirs(self.summary_dir, exist_ok=True)
+            train_writer = tf.summary.FileWriter(self.summary_dir,
+                                                 self.sess.graph)
 
         # TODO: Run the simulations in parallel. Will need to somehow create
         # exp-broadcaster shareable.
@@ -697,27 +786,36 @@ class ExpRecurrentTrainer:
             batch = []
             seed_end = seed_start + self.batch_size
 
+            # Make this parallel!
             for seed in range(seed_start, seed_end):
                 batch.append(self.run_sim(seed))
 
             f_d = self.get_feed_dict(batch)
-            reward, LL, loss, grad_norm, _ = \
-                self.sess.run([self.tf_batch_rewards, self.LL, self.loss,
-                               self.grad_norm, train_op],
-                              feed_dict=f_d)
+            if with_summaries:
+                reward, LL, loss, grad_norm, summaries, step, _ = \
+                    self.sess.run([self.tf_batch_rewards, self.LL, self.loss,
+                                   self.grad_norm, self.tf_merged_summaries,
+                                   self.tf_global_step, train_op],
+                                  feed_dict=f_d)
+                train_writer.add_summary(summaries, step)
+            else:
+                reward, LL, loss, grad_norm, step, _ = \
+                    self.sess.run([self.tf_batch_rewards, self.LL, self.loss,
+                                   self.grad_norm, self.global_step, train_op],
+                                  feed_dict=f_d)
 
             mean_LL = np.mean(LL)
             mean_loss = np.mean(loss)
             mean_reward = np.mean(reward)
 
             print('{} Run {}, LL {:.5f}, loss {:.5f}, r^2(t) {:.5f}'
-                  ', CTG {:.5f}, seeds {}--{}, grad_norm {:.5f}'
+                  ', CTG {:.5f}, seeds {}--{}, grad_norm {:.5f}, step = {}'
                   .format(_now(), epoch, mean_LL, mean_loss,
                           mean_reward, mean_reward + mean_loss,
-                          seed_start, seed_end - 1, grad_norm))
+                          seed_start, seed_end - 1, grad_norm, step))
 
             chkpt_file = os.path.join(SAVE_DIR, 'tpprl.ckpt')
-            saver.save(self.sess, chkpt_file, global_step=epoch)
+            saver.save(self.sess, chkpt_file, global_step=self.global_step)
 
             # Ready for the next epoch.
             seed_start = seed_end
@@ -801,9 +899,10 @@ class ExpPredBroadcaster(OM.Broadcaster):
         else:
             self.cur_h = self.update_hidden_state(event.src_id, event.time_delta)
             next_post_time = self.exp_sampler.register_event(
-                                    event.cur_time,
-                                    self.cur_h,
-                                    own_event=event.src_id == self.src_id)
+                event.cur_time,
+                self.cur_h,
+                own_event=event.src_id == self.src_id
+            )
             next_delta = next_post_time - self.last_self_event_time
             # print(next_delta)
             assert next_delta >= 0
@@ -977,7 +1076,7 @@ class ExpPredTrainer:
                     )
 
                     self.LL += tf.where(tf.squeeze(evt_idx <= self.tf_batch_seq_len),
-                                    tf.where(tf.equal(self.tf_batch_b_idxes[:, evt_idx], sim_opts.src_id),
+                                    tf.where(tf.equal(self.tf_batch_b_idxes[:, evt_idx], 0),
                                         tf.squeeze(tf.log(tf_batch_u_theta)),
                                         tf.zeros(dtype=tf.float32, shape=batch_size)) +
                                     (1 / self.tf_wt) * tf.squeeze(
@@ -1102,4 +1201,3 @@ class ExpPredTrainer:
             pass
 
 
-os.makedirs(SAVE_DIR, exist_ok=True)
