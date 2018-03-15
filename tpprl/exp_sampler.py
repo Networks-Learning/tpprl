@@ -1,5 +1,7 @@
+"""This file contains the samplers implemented using numpy only."""
 import decorated_options as Deco
 import numpy as np
+
 
 class CDFSampler:
     """A generic sampler which assumes that the intensity u(t) has the form:
@@ -24,6 +26,16 @@ class CDFSampler:
         self.random_state = np.random.RandomState(seed)
         self.reset(t_min, init_h, reset_sample=True)
 
+    def cdf(self, t):
+        """Return the CDF calculated at 't', given the current state of the intensity.
+        It also assumes that the last event was at self.t0.
+        """
+        raise NotImplementedError('cdf has to be implemented by the sub-class')
+
+    def generate_sample(self):
+        """Find a sample from the Exp process."""
+        raise NotImplementedError('generate_sample has to be implemented by the sub-class.')
+
     def reset_only_sample(self, cur_time):
         """Resets only the present sample.
 
@@ -36,12 +48,6 @@ class CDFSampler:
         self.Q = 1.0
 
         return self.generate_sample()
-
-    def cdf(self, t):
-        """Return the CDF calculated at 't', given the current state of the intensity.
-        It also assumes that the last event was at self.t0.
-        """
-        raise NotImplementedError('cdf has to be implemented by the sub-class')
 
     def reset(self, cur_time, init_h, reset_sample):
         """Reset the sampler for generating another event."""
@@ -65,9 +71,43 @@ class CDFSampler:
     def get_last_hidden_state(self):
         return self.h
 
-    def generate_sample(self):
-        """Find a sample from the Exp process."""
-        raise NotImplementedError('generate_sample has to be implemented by the sub-class.')
+    def get_last_c(self):
+        return self.c
+
+    def int_u(self, dt, c):
+        """Value of U(dt) - U(0)."""
+        raise NotImplementedError('int_u needs to be implemented by the sub-class.')
+
+    def log_u(self, t, c):
+        """Value of log u(t)."""
+        raise NotImplementedError('Needs to be implemented by the sub-class.')
+
+    def int_u_2(self, t, c):
+        """Value of U^2(dt) - U^2(0)."""
+        raise NotImplementedError('Needs to be implemented by the sub-class.')
+
+    def calc_quad_loss(self, event_time_deltas, c_is):
+        """Calculates the regularise loss.
+        The last entry of event_time_deltas should be T - t_last.
+        The first entry of hidden_states should be the initial state.
+        """
+        return sum(self.int_u_2(dt, c)
+                   for dt, c in zip(event_time_deltas, c_is))
+
+    def calc_LL(self, event_time_deltas, c_is, is_own_event):
+        """Calculates the log-likelihood.
+        The last entry of event_time_deltas should be T - t_last.
+        The first entry of hidden_states should be the initial state.
+        The last entry of is_own_event correspond to the phantom event at the end of the survival.
+        """
+        assert not is_own_event[-1], "The last entry cannot be an event."
+
+        LL_log = sum(self.log_u(dt, c)
+                     for dt, c, o in zip(event_time_deltas, c_is, is_own_event)
+                     if o)
+        LL_int = sum(self.int_u(dt, c) for dt, c in zip(event_time_deltas, c_is))
+
+        return LL_log - LL_int
 
 
 class ExpCDFSampler(CDFSampler):
@@ -87,50 +127,15 @@ class ExpCDFSampler(CDFSampler):
         else:
             return self.t0 + (1 / self.w) * np.log(D)
 
-    def calc_LL(self, event_time_deltas, survival_time, hidden_states, init_h):
-        """Calculates the likelihood of the given event time deltas and
-        hidden-states."""
-        LL = 0
+    def int_u(self, dt, c):
+        return (1 / self.wt) * (np.exp(c + self.wt * dt) - np.exp(c))
 
-        def log_u(tau, h):
-            return self.bt + self.vt.dot(h) + self.wt * tau
+    def log_u(self, dt, c):
+        return c + self.wt * dt
 
-        for t, h in zip(event_time_deltas,
-                        [init_h] + hidden_states[:-1]):
-            u_t_term = log_u(t, h)
-            u_0_term = log_u(0, h)
-            # TODO: Which 'h' will be used here in the second term?
-            # TODO (should only count events which have been created by us, not merely events which changed the hidden state)
-            LL_log = u_t_term
-            LL_int = (1 / self.wt) * (np.exp(u_t_term) - np.exp(u_0_term))
-            LL += LL_log - LL_int
-
-        last_hidden_state = hidden_states[-1]
-        LL -= (1 / self.wt) * (np.exp(log_u(survival_time, last_hidden_state)) -
-                               np.exp(log_u(0, last_hidden_state)))
-        return LL
-
-    def calc_quad_loss(self, event_time_deltas, survival_time, hidden_states, init_h, q):
-        """Calculates the loss incurred by the given event time deltas and hidden-states."""
-        loss = 0
-
-        def u_2(tau, h):
-            return np.exp(2 * (self.bt + self.vt.dot(h) + self.wt * tau))
-
-        for t, h in zip(event_time_deltas,
-                        [init_h] + hidden_states[:-1]):
-            u_t_term = u_2(t, h)
-            u_0_term = u_2(0, h)
-            # TODO: Which 'h' will be used here in the second term?
-            # TODO: This can be made more numerically stable by using the identity:
-            # a^2 - b^2 = (a + b) * (a - b)
-            # Prevents squaring, at least.
-            loss += (1 / (2 * self.wt)) * (u_t_term - u_0_term)
-
-        last_hidden_state = hidden_states[-1]
-        loss += (1 / (2 * self.wt)) * (u_2(survival_time, last_hidden_state) -
-                                       u_2(0, last_hidden_state))
-        return loss
+    def int_u_2(self, dt, c):
+        return (1 / (2 * self.wt)) * (np.exp(2 * c + 2 * self.wt * dt) -
+                                      np.exp(2 * c))
 
 
 class SigmoidCDFSampler(CDFSampler):
@@ -156,3 +161,16 @@ class SigmoidCDFSampler(CDFSampler):
             return np.inf
         else:
             return self.t0 + (np.log(D) - self.c) / self.wt
+
+    def log_u(self, dt, c):
+        return np.log(1 / (1 + np.exp(-(c + self.wt * dt))))
+
+    def int_u(self, dt, c):
+        return (self.k / self.wt) * (np.log1p(np.exp(c + self.wt * dt)) - np.log1p(np.exp(c)))
+
+    def int_u_2(self, dt, c):
+        return ((self.k ** 2) / self.wt) * (1 / (1 + np.exp(c + self.wt * dt)) +
+                                            np.log1p(np.exp(c + self.wt * dt)) -
+                                            1 / (1 + np.exp(c)) -
+                                            np.log1p(np.exp(c)))
+

@@ -120,6 +120,7 @@ class ExpRecurrentBroadcaster(OM.Broadcaster):
         if event is None:
             # This is the first event. Post immediately to join the party?
             # Or hold off?
+            # Currently, it is waiting.
             return self.exp_sampler.generate_sample()
         else:
             self.cur_h = self.update_hidden_state(event.src_id, event.time_delta)
@@ -137,12 +138,174 @@ class ExpRecurrentBroadcaster(OM.Broadcaster):
 OM.SimOpts.registerSource('ExpRecurrentBroadcaster', ExpRecurrentBroadcaster)
 
 
+class TPPRSigmoidCell(tf.contrib.rnn.RNNCell):
+    def __init__(self, hidden_state_size, output_size, src_id, tf_dtype,
+                 Wm, Wr, Wh, Wt, Bh,
+                 wt, vt, bt, k):
+        self._output_size = output_size
+        self._hidden_state_size = hidden_state_size
+        self.src_id = src_id
+        self.tf_dtype = tf_dtype
+
+        self.tf_Wm = Wm
+        self.tf_Wr = Wr
+        self.tf_Wh = Wh
+        self.tf_Wt = Wt
+        self.tf_Bh = Bh
+
+        self.tf_wt = wt
+        self.tf_vt = vt
+        self.tf_bt = bt
+
+        self.tf_k = k
+
+    def u_theta(self, dt, c):
+        return self.tf_k / (1 + tf.exp(-(c + self.tf_wt * dt)))
+
+    def int_u(self, dt, c):
+        return (self.tf_k / self.tf_wt) * (
+            tf.log1p(tf.exp(c + self.tf_wt * dt)) -
+            tf.log1p(tf.exp(c))
+        )
+
+    def int_u_2(self, dt, c):
+        return (np.square(self.tf_k) / self.tf_wt) * (
+            tf.sigmoid(-(c + self.tf_wt * dt)) +
+            tf.log1p(tf.exp(c + self.tf_wt * dt)) -
+            tf.sigmoid(-c) -
+            tf.log1p(tf.exp(c))
+        )
+
+    def __call__(self, inp, h_prev):
+        raw_broadcaster_idx, rank, t_delta = inp
+        inf_batch_size = tf.shape(raw_broadcaster_idx)[0]
+
+        broadcaster_idx = tf.squeeze(raw_broadcaster_idx, axis=-1)
+
+        h_next = tf.nn.tanh(
+            tf.nn.embedding_lookup(self.tf_Wm, broadcaster_idx) +
+            tf.matmul(h_prev, self.tf_Wh, transpose_b=True) +
+            tf.matmul(rank, self.tf_Wr, transpose_b=True) +
+            tf.matmul(t_delta, self.tf_Wt, transpose_b=True) +
+            tf.transpose(self.tf_Bh),
+            name='h_next'
+        )
+
+        c = tf.matmul(h_prev, self.tf_vt) + self.tf_wt * t_delta + self.tf_bt
+
+        u_theta = self.u_theta(t_delta, c, name='u_theta')
+        # print('u_theta = ', u_theta)
+
+        # t_0 = tf.zeros(name='zero_time', shape=(inf_batch_size, 1), dtype=self.tf_dtype)
+        # u_theta_0 = self.u_theta(t_0, name='u_theta_0')
+
+        LL_log = tf.where(
+            tf.equal(broadcaster_idx, self.src_id),
+            tf.squeeze(tf.log(u_theta), axis=-1),
+            tf.zeros(dtype=self.tf_dtype, shape=(inf_batch_size,)),
+            name='LL_log'
+        )
+        # print('LL_log = ', LL_log)
+        LL_int = self.int_u(t_delta, c)
+        # print('LL_int = ', LL_int)
+        loss = self.int_u_2(t_delta, c)
+        # print('loss = ', loss)
+
+        return ((h_next,
+                 tf.expand_dims(LL_log, axis=-1, name='LL_log'),
+                 LL_int,
+                 loss),
+                h_next)
+
+    @property
+    def output_size(self):
+        return self._output_size
+
+    @property
+    def state_size(self):
+        return self._hidden_state_size
+
+
+class TPPRExpCell(tf.contrib.rnn.RNNCell):
+    def __init__(self, hidden_state_size, output_size, src_id, tf_dtype,
+                 Wm, Wr, Wh, Wt, Bh,
+                 wt, vt, bt):
+        self._output_size = output_size
+        self._hidden_state_size = hidden_state_size
+        self.src_id = src_id
+        self.tf_dtype = tf_dtype
+
+        self.tf_Wm = Wm
+        self.tf_Wr = Wr
+        self.tf_Wh = Wh
+        self.tf_Wt = Wt
+        self.tf_Bh = Bh
+
+        self.tf_wt = wt
+        self.tf_vt = vt
+        self.tf_bt = bt
+
+    def u_theta(self, h, t_delta, name):
+        return tf.exp(
+            tf.matmul(h, self.tf_vt) +
+            self.tf_wt * t_delta +
+            self.tf_bt,
+            name=name
+        )
+
+    def __call__(self, inp, h_prev):
+        raw_broadcaster_idx, rank, t_delta = inp
+        inf_batch_size = tf.shape(raw_broadcaster_idx)[0]
+
+        broadcaster_idx = tf.squeeze(raw_broadcaster_idx, axis=-1)
+
+        h_next = tf.nn.tanh(
+            tf.nn.embedding_lookup(self.tf_Wm, broadcaster_idx) +
+            tf.matmul(h_prev, self.tf_Wh, transpose_b=True) +
+            tf.matmul(rank, self.tf_Wr, transpose_b=True) +
+            tf.matmul(t_delta, self.tf_Wt, transpose_b=True) +
+            tf.transpose(self.tf_Bh),
+            name='h_next'
+        )
+
+        u_theta = self.u_theta(h_prev, t_delta, name='u_theta')
+        # print('u_theta = ', u_theta)
+
+        t_0 = tf.zeros(name='zero_time', shape=(inf_batch_size, 1), dtype=self.tf_dtype)
+        u_theta_0 = self.u_theta(h_prev, t_0, name='u_theta_0')
+
+        LL_log = tf.where(
+            tf.equal(broadcaster_idx, self.src_id),
+            tf.squeeze(tf.log(u_theta), axis=-1),
+            tf.zeros(dtype=self.tf_dtype, shape=(inf_batch_size,))
+        )
+        # print('LL_log = ', LL_log)
+        LL_int = (1 / self.tf_wt) * (u_theta - u_theta_0)
+        # print('LL_int = ', LL_int)
+        loss = (1 / (2 * self.tf_wt)) * (tf.square(u_theta) - tf.square(u_theta_0))
+        # print('loss = ', loss)
+
+        return ((h_next,
+                 tf.expand_dims(LL_log, axis=-1, name='LL_log'),
+                 LL_int,
+                 loss),
+                h_next)
+
+    @property
+    def output_size(self):
+        return self._output_size
+
+    @property
+    def state_size(self):
+        return self._hidden_state_size
+
+
 class ExpRecurrentTrainer:
 
     @Deco.optioned()
     def __init__(self, Wm, Wh, Wt, Wr, Bh, vt, wt, bt, init_h, sess, sim_opts,
                  scope=None, t_min=0, batch_size=16, max_events=100,
-                 learning_rate=0.01, clip_norm=1.0):
+                 learning_rate=0.01, clip_norm=1.0, with_dynamic_rnn=False):
         """Initialize the trainer with the policy parameters."""
         self.src_embed_map = {x.src_id: idx + 1
                               for idx, x in enumerate(sim_opts.create_other_sources())}
@@ -197,8 +360,6 @@ class ExpRecurrentTrainer:
                     name="h_next"
                 )
 
-                # self.tf_h_next = tf.nn.
-
             with tf.variable_scope("output"):
                 self.tf_bt = tf.get_variable(name="bt", shape=bt.shape,
                                              initializer=tf.constant_initializer(bt))
@@ -243,11 +404,6 @@ class ExpRecurrentTrainer:
                                                                shape=(inf_batch_size, self.num_hidden_states),
                                                                dtype=self.tf_dtype)
 
-                self.h_states = []
-                self.LL_log_terms = []
-                self.LL_int_terms = []
-                self.loss_terms = []
-
                 # self.LL = tf.zeros(name="log_likelihood", dtype=self.tf_dtype, shape=(self.tf_batch_size))
                 # self.loss = tf.zeros(name="loss", dtype=self.tf_dtype, shape=(self.tf_batch_size))
 
@@ -263,68 +419,105 @@ class ExpRecurrentTrainer:
                 # TODO: Convert this to a tf.while_loop, perhaps.
                 # The performance benefit is debatable, but the graph may be constructed faster.
                 # TODO: Another idea is to convert it to use dynamic_rnn.
-                for evt_idx in range(max_events):
-                    # Perhaps this can be melded into the old definition of tf_h_next
-                    # above by using the batch size dimension as None?
-                    # TODO: Investigate
-                    tf_batch_h_t = tf.where(
-                        tf.tile(evt_idx <= self.tf_batch_seq_len, [1, self.num_hidden_states]),
-                        tf.nn.tanh(
-                            tf.nn.embedding_lookup(self.tf_Wm,
-                                                   self.tf_batch_b_idxes[:, evt_idx]) +
-                            tf.matmul(tf_batch_h_t, self.tf_Wh, transpose_b=True) +
-                            tf.matmul(tf.expand_dims(self.tf_batch_ranks[:, evt_idx], 1),
-                                      self.tf_Wr, transpose_b=True) +
-                            tf.matmul(tf.expand_dims(self.tf_batch_t_deltas[:, evt_idx], 1),
-                                      self.tf_Wt, transpose_b=True) +
-                            tf.tile(tf.transpose(self.tf_Bh), [inf_batch_size, 1])
-                        ),
-                        tf.zeros(dtype=self.tf_dtype, shape=(inf_batch_size, self.num_hidden_states))
-                        # The gradient of a constant w.r.t. a variable is None or 0
+                if not with_dynamic_rnn:
+                    self.h_states = []
+                    self.LL_log_terms = []
+                    self.LL_int_terms = []
+                    self.loss_terms = []
+
+                    for evt_idx in range(max_events):
+                        # Perhaps this can be melded into the old definition of tf_h_next
+                        # above by using the batch size dimension as None?
+                        # TODO: Investigate
+                        tf_batch_h_t = tf.where(
+                            tf.tile(evt_idx < self.tf_batch_seq_len, [1, self.num_hidden_states]),
+                            tf.nn.tanh(
+                                tf.nn.embedding_lookup(self.tf_Wm,
+                                                       self.tf_batch_b_idxes[:, evt_idx]) +
+                                tf.matmul(tf_batch_h_t, self.tf_Wh, transpose_b=True) +
+                                tf.matmul(tf.expand_dims(self.tf_batch_ranks[:, evt_idx], 1),
+                                          self.tf_Wr, transpose_b=True) +
+                                tf.matmul(tf.expand_dims(self.tf_batch_t_deltas[:, evt_idx], 1),
+                                          self.tf_Wt, transpose_b=True) +
+                                tf.tile(tf.transpose(self.tf_Bh), [inf_batch_size, 1])
+                            ),
+                            tf_batch_h_t
+                            # tf.zeros(dtype=self.tf_dtype, shape=(inf_batch_size, self.num_hidden_states))
+                            # The gradient of a constant w.r.t. a variable is None or 0
+                        )
+                        tf_batch_u_theta = tf.where(
+                            evt_idx < self.tf_batch_seq_len,
+                            batch_u_theta(self.tf_batch_t_deltas[:, evt_idx]),
+                            tf.zeros(dtype=self.tf_dtype, shape=(inf_batch_size, 1))
+                        )
+
+                        self.h_states.append(tf_batch_h_t)
+                        self.LL_log_terms.append(tf.where(
+                            tf.squeeze(evt_idx < self.tf_batch_seq_len),
+                            tf.where(
+                                tf.equal(self.tf_batch_b_idxes[:, evt_idx], sim_opts.src_id),
+                                tf.squeeze(tf.log(tf_batch_u_theta)),
+                                tf.zeros(dtype=self.tf_dtype, shape=(inf_batch_size,))),
+                            tf.zeros(dtype=self.tf_dtype, shape=(inf_batch_size,))))
+
+                        self.LL_int_terms.append(tf.where(
+                            tf.squeeze(evt_idx < self.tf_batch_seq_len),
+                            (1 / self.tf_wt) * tf.squeeze(
+                                tf_batch_u_theta -
+                                batch_u_theta(t_0)
+                            ),
+                            tf.zeros(dtype=self.tf_dtype, shape=(inf_batch_size,))))
+
+                        self.loss_terms.append(tf.where(
+                            tf.squeeze(evt_idx < self.tf_batch_seq_len),
+                            (1 / (2 * self.tf_wt)) * tf.squeeze(
+                                tf.square(tf_batch_u_theta) -
+                                tf.square(batch_u_theta(t_0))
+                            ),
+                            tf.zeros(dtype=self.tf_dtype, shape=(inf_batch_size,))))
+
+                    self.LL = tf.add_n(self.LL_log_terms) - tf.add_n(self.LL_int_terms)
+                    self.loss = tf.add_n(self.loss_terms)
+                else:
+                    rnn_cell = TPPRExpCell(
+                        hidden_state_size=(None, self.num_hidden_states),
+                        output_size=[self.num_hidden_states] + [1] * 3,
+                        src_id=sim_opts.src_id,
+                        tf_dtype=self.tf_dtype,
+                        Wm=self.tf_Wm, Wr=self.tf_Wr, Wh=self.tf_Wh,
+                        Wt=self.tf_Wt, Bh=self.tf_Bh,
+                        wt=self.tf_wt, vt=self.tf_vt, bt=self.tf_bt
                     )
-                    tf_batch_u_theta = tf.where(
-                        evt_idx <= self.tf_batch_seq_len,
-                        batch_u_theta(self.tf_batch_t_deltas[:, evt_idx]),
-                        tf.zeros(dtype=self.tf_dtype, shape=(inf_batch_size, 1))
+
+                    ((self.h_states, LL_log_terms, LL_int_terms, loss_terms), tf_batch_h_t) = tf.nn.dynamic_rnn(
+                        rnn_cell,
+                        inputs=(tf.expand_dims(self.tf_batch_b_idxes, axis=-1),
+                                tf.expand_dims(self.tf_batch_ranks, axis=-1),
+                                tf.expand_dims(self.tf_batch_t_deltas, axis=-1)),
+                        sequence_length=tf.squeeze(self.tf_batch_seq_len, axis=-1),
+                        dtype=self.tf_dtype,
+                        initial_state=self.tf_batch_init_h
                     )
+                    self.LL_log_terms = tf.squeeze(LL_log_terms, axis=-1)
+                    self.LL_int_terms = tf.squeeze(LL_int_terms, axis=-1)
+                    self.loss_terms = tf.squeeze(loss_terms, axis=-1)
 
-                    self.h_states.append(tf_batch_h_t)
-                    self.LL_log_terms.append(tf.where(
-                        tf.squeeze(evt_idx <= self.tf_batch_seq_len),
-                        tf.where(
-                            tf.equal(self.tf_batch_b_idxes[:, evt_idx], sim_opts.src_id),
-                            tf.squeeze(tf.log(tf_batch_u_theta)),
-                            tf.zeros(dtype=self.tf_dtype, shape=(inf_batch_size,))),
-                        tf.zeros(dtype=self.tf_dtype, shape=(inf_batch_size,))))
-
-                    self.LL_int_terms.append(tf.where(
-                        tf.squeeze(evt_idx <= self.tf_batch_seq_len),
-                        (1 / self.tf_wt) * tf.squeeze(
-                            tf_batch_u_theta -
-                            batch_u_theta(t_0)
-                        ),
-                        tf.zeros(dtype=self.tf_dtype, shape=(inf_batch_size,))))
-
-                    self.loss_terms.append(tf.where(
-                        tf.squeeze(evt_idx <= self.tf_batch_seq_len),
-                        (1 / (2 * self.tf_wt)) * tf.squeeze(
-                            tf.square(tf_batch_u_theta) -
-                            tf.square(batch_u_theta(t_0))
-                        ),
-                        tf.zeros(dtype=self.tf_dtype, shape=(inf_batch_size,))))
-
-        self.LL = tf.add_n(self.LL_log_terms) - tf.add_n(self.LL_int_terms)
-        self.loss = tf.add_n(self.loss_terms)
+                    self.LL = tf.reduce_sum(self.LL_log_terms, axis=1) - tf.reduce_sum(self.LL_int_terms, axis=1)
+                    self.loss = tf.reduce_sum(self.loss_terms, axis=1)
 
         # Here, outside the loop, add the survival term for the batch to
         # both the loss and to the LL.
-        self.LL -= (1 / self.tf_wt) * tf.squeeze(
+        self.LL_last = -(1 / self.tf_wt) * tf.squeeze(
             batch_u_theta(self.tf_batch_last_interval) - batch_u_theta(t_0)
         )
-        self.loss += (1 / (2 * self.tf_wt)) * tf.squeeze(
+
+        self.loss_last = (1 / (2 * self.tf_wt)) * tf.squeeze(
             tf.square(batch_u_theta(self.tf_batch_last_interval)) -
             tf.square(batch_u_theta(t_0))
         )
+
+        self.LL += self.LL_last
+        self.loss += self.loss_last
         self.loss *= self.q / 2
 
         self.all_tf_vars = [self.tf_Wh, self.tf_Wm, self.tf_Wt, self.tf_Bh,
@@ -346,7 +539,7 @@ class ExpRecurrentTrainer:
             # by matrix multiplication soon.
             [(((tf.gather(self.tf_batch_rewards, idx) + tf.gather(self.loss, idx)) * self.LL_grads[x][idx][0] +
                self.loss_grads[x][idx][0]),
-               x) for x in self.all_tf_vars]
+              x) for x in self.all_tf_vars]
             for idx in range(self.batch_size)
         ]
 
@@ -461,7 +654,7 @@ class ExpRecurrentTrainer:
             reward = batch_rewards[batch_idx]
             loss = losses[batch_idx]
             # TODO: Is there a better way of working with IndexesSlicedValue
-            # then converting it to a dense numpy array? Probably not.
+            # than converting it to a dense numpy array? Probably not.
             batch_grad = {}
             for x in self.all_tf_vars:
                 LL_grad = LL_grads[x][batch_idx][0]
@@ -517,8 +710,8 @@ class ExpRecurrentTrainer:
             mean_loss = np.mean(loss)
             mean_reward = np.mean(reward)
 
-            print('{} Run {}, LL {:.3f}, loss {:.3f}, r^2(t) {:.3f}'
-                  ', CTG {:.3f}, seeds {}--{}, grad_norm {:.3f}'
+            print('{} Run {}, LL {:.5f}, loss {:.5f}, r^2(t) {:.5f}'
+                  ', CTG {:.5f}, seeds {}--{}, grad_norm {:.5f}'
                   .format(_now(), epoch, mean_LL, mean_loss,
                           mean_reward, mean_reward + mean_loss,
                           seed_start, seed_end - 1, grad_norm))
