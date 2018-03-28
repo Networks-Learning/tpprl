@@ -470,85 +470,86 @@ class ExpRecurrentTrainer:
         var_device = device_cpu if only_cpu else device_gpu
 
         with tf.variable_scope(self.scope):
-            with tf.variable_scope("hidden_state"):
+            with tf.variable_scope('hidden_state'):
                 with tf.device(var_device):
-                    self.tf_Wm = tf.get_variable(name="Wm", shape=Wm.shape,
+                    self.tf_Wm = tf.get_variable(name='Wm', shape=Wm.shape,
                                                  initializer=tf.constant_initializer(Wm))
-                    self.tf_Wh = tf.get_variable(name="Wh", shape=Wh.shape,
+                    self.tf_Wh = tf.get_variable(name='Wh', shape=Wh.shape,
                                                  initializer=tf.constant_initializer(Wh))
-                    self.tf_Wt = tf.get_variable(name="Wt", shape=Wt.shape,
+                    self.tf_Wt = tf.get_variable(name='Wt', shape=Wt.shape,
                                                  initializer=tf.constant_initializer(Wt))
-                    self.tf_Wr = tf.get_variable(name="Wr", shape=Wr.shape,
+                    self.tf_Wr = tf.get_variable(name='Wr', shape=Wr.shape,
                                                  initializer=tf.constant_initializer(Wr))
-                    self.tf_Bh = tf.get_variable(name="Bh", shape=Bh.shape,
+                    self.tf_Bh = tf.get_variable(name='Bh', shape=Bh.shape,
                                                  initializer=tf.constant_initializer(Bh))
 
-                # Needed to calculate the hidden state for one step.
-                self.tf_h = tf.get_variable(name="h", initializer=tf.zeros((self.num_hidden_states, 1), dtype=self.tf_dtype))
-                self.tf_b_idx = tf.placeholder(name="b_idx", shape=1, dtype=tf.int32)
-                self.tf_t_delta = tf.placeholder(name="t_delta", shape=1, dtype=self.tf_dtype)
-                self.tf_rank = tf.placeholder(name="rank", shape=1, dtype=self.tf_dtype)
+                    # Needed to calculate the hidden state for one step.
+                    self.tf_h = tf.get_variable(name='h', initializer=tf.zeros((self.num_hidden_states, 1), dtype=self.tf_dtype))
+
+                self.tf_b_idx = tf.placeholder(name='b_idx', shape=1, dtype=tf.int32)
+                self.tf_t_delta = tf.placeholder(name='t_delta', shape=1, dtype=self.tf_dtype)
+                self.tf_rank = tf.placeholder(name='rank', shape=1, dtype=self.tf_dtype)
 
                 self.tf_h_next = tf.nn.tanh(
                     tf.transpose(
-                        tf.nn.embedding_lookup(self.tf_Wm, self.tf_b_idx, name="b_embed")
+                        tf.nn.embedding_lookup(self.tf_Wm, self.tf_b_idx, name='b_embed')
                     ) +
                     tf.matmul(self.tf_Wh, self.tf_h) +
                     self.tf_Wr * self.tf_rank +
                     self.tf_Wt * self.tf_t_delta +
                     self.tf_Bh,
-                    name="h_next"
+                    name='h_next'
                 )
 
-            with tf.variable_scope("output"):
+            with tf.variable_scope('output'):
                 with tf.device(var_device):
-                    self.tf_bt = tf.get_variable(name="bt", shape=bt.shape,
+                    self.tf_bt = tf.get_variable(name='bt', shape=bt.shape,
                                                  initializer=tf.constant_initializer(bt))
-                    self.tf_vt = tf.get_variable(name="vt", shape=vt.shape,
+                    self.tf_vt = tf.get_variable(name='vt', shape=vt.shape,
                                                  initializer=tf.constant_initializer(vt))
-                    self.tf_wt = tf.get_variable(name="wt", shape=wt.shape,
+                    self.tf_wt = tf.get_variable(name='wt', shape=wt.shape,
                                                  initializer=tf.constant_initializer(wt))
-                # self.tf_t_delta = tf.placeholder(name="t_delta", shape=1, dtype=self.tf_dtype)
+                # self.tf_t_delta = tf.placeholder(name='t_delta', shape=1, dtype=self.tf_dtype)
                 # self.tf_u_t = tf.exp(
                 #     tf.tensordot(self.tf_vt, self.tf_h, axes=1) +
                 #     self.tf_t_delta * self.tf_wt +
                 #     self.tf_bt,
-                #     name="u_t"
+                #     name='u_t'
                 # )
 
             # Create a large dynamic_rnn kind of network which can calculate
             # the gradients for a given given batch of simulations.
-            with tf.variable_scope("training"):
-                self.tf_batch_rewards = tf.placeholder(name="rewards",
+            with tf.variable_scope('training'):
+                self.tf_batch_rewards = tf.placeholder(name='rewards',
                                                        shape=(self.tf_batch_size, 1),
                                                        dtype=self.tf_dtype)
-                self.tf_batch_t_deltas = tf.placeholder(name="t_deltas",
+                self.tf_batch_t_deltas = tf.placeholder(name='t_deltas',
                                                         shape=(self.tf_batch_size, max_events),
                                                         dtype=self.tf_dtype)
-                self.tf_batch_b_idxes = tf.placeholder(name="b_idxes",
+                self.tf_batch_b_idxes = tf.placeholder(name='b_idxes',
                                                        shape=(self.tf_batch_size, max_events),
                                                        dtype=tf.int32)
-                self.tf_batch_ranks = tf.placeholder(name="ranks",
+                self.tf_batch_ranks = tf.placeholder(name='ranks',
                                                      shape=(self.tf_batch_size, max_events),
                                                      dtype=self.tf_dtype)
-                self.tf_batch_seq_len = tf.placeholder(name="seq_len",
+                self.tf_batch_seq_len = tf.placeholder(name='seq_len',
                                                        shape=(self.tf_batch_size, 1),
                                                        dtype=tf.int32)
-                self.tf_batch_last_interval = tf.placeholder(name="last_interval",
+                self.tf_batch_last_interval = tf.placeholder(name='last_interval',
                                                              shape=self.tf_batch_size,
                                                              dtype=self.tf_dtype)
 
                 # Inferred batch size
                 inf_batch_size = tf.shape(self.tf_batch_b_idxes)[0]
 
-                self.tf_batch_init_h = tf_batch_h_t = tf.zeros(name="init_h",
+                self.tf_batch_init_h = tf_batch_h_t = tf.zeros(name='init_h',
                                                                shape=(inf_batch_size, self.num_hidden_states),
                                                                dtype=self.tf_dtype)
 
-                # self.LL = tf.zeros(name="log_likelihood", dtype=self.tf_dtype, shape=(self.tf_batch_size))
-                # self.loss = tf.zeros(name="loss", dtype=self.tf_dtype, shape=(self.tf_batch_size))
+                # self.LL = tf.zeros(name='log_likelihood', dtype=self.tf_dtype, shape=(self.tf_batch_size))
+                # self.loss = tf.zeros(name='loss', dtype=self.tf_dtype, shape=(self.tf_batch_size))
 
-                t_0 = tf.zeros(name="event_time", shape=(inf_batch_size,), dtype=self.tf_dtype)
+                t_0 = tf.zeros(name='event_time', shape=(inf_batch_size,), dtype=self.tf_dtype)
 
                 def batch_u_theta(batch_t_deltas):
                     return tf.exp(
