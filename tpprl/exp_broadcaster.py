@@ -768,15 +768,17 @@ class ExpRecurrentTrainer:
         self.src_id = sim_opts.src_id
         self.sess = sess
 
-        self.all_vars = [self.tf_Wt, self.tf_Wm, self.tf_Wh, self.tf_Wt,
-                         self.tf_Wr, self.tf_Bh, self.tf_bt, self.tf_vt]
+        # There are other global variables as well, like the ones which the
+        # ADAM optimizer uses.
+        self.saver = tf.train.Saver(tf.global_variables())
 
         with tf.device(device_cpu):
             tf.contrib.training.add_gradients_summaries(self.avg_gradient)
 
-            for v in self.all_vars:
+            for v in self.all_tf_vars:
                 variable_summaries(v)
 
+            variable_summaries(self.tf_learning_rate, name='learning_rate')
             variable_summaries(self.loss, name='loss')
             variable_summaries(self.LL, name='LL')
             variable_summaries(self.loss_last, name='loss_last_term')
@@ -926,8 +928,6 @@ class ExpRecurrentTrainer:
     def train_many(self, num_iters, init_seed=42,
                    clipping=True, with_summaries=False, with_MP=False):
         """Run one SGD op given a batch of simulation."""
-        saver = tf.train.Saver(tf.global_variables())
-
         # TODO: First determine whether we are applying the gradients in the
         # correct direction.
         seed_start = init_seed
@@ -954,16 +954,18 @@ class ExpRecurrentTrainer:
             f_d = self.get_feed_dict(batch)
 
             if with_summaries:
-                reward, LL, loss, grad_norm, summaries, step, _ = \
+                reward, LL, loss, grad_norm, summaries, step, lr, _ = \
                     self.sess.run([self.tf_batch_rewards, self.LL, self.loss,
                                    self.grad_norm, self.tf_merged_summaries,
-                                   self.global_step, train_op],
+                                   self.global_step, self.tf_learning_rate,
+                                   train_op],
                                   feed_dict=f_d)
                 train_writer.add_summary(summaries, step)
             else:
-                reward, LL, loss, grad_norm, step, _ = \
+                reward, LL, loss, grad_norm, step, lr, _ = \
                     self.sess.run([self.tf_batch_rewards, self.LL, self.loss,
-                                   self.grad_norm, self.global_step, train_op],
+                                   self.grad_norm, self.global_step,
+                                   self.tf_learning_rate, train_op],
                                   feed_dict=f_d)
 
             mean_LL = np.mean(LL)
@@ -971,20 +973,19 @@ class ExpRecurrentTrainer:
             mean_reward = np.mean(reward)
 
             print('{} Run {}, LL {:.5f}, loss {:.5f}, r^2(t) {:.5f}'
-                  ', CTG {:.5f}, seeds {}--{}, grad_norm {:.5f}, step = {}'
+                  ', CTG {:.5f}, seeds {}--{}, grad_norm {:.5f}, step = {}, lr = {:.5f}'
                   .format(_now(), epoch, mean_LL, mean_loss,
                           mean_reward, mean_reward + mean_loss,
-                          seed_start, seed_end - 1, grad_norm, step))
+                          seed_start, seed_end - 1, grad_norm, step, lr))
 
             chkpt_file = os.path.join(self.save_dir, 'tpprl.ckpt')
-            saver.save(self.sess, chkpt_file, global_step=self.global_step)
+            self.saver.save(self.sess, chkpt_file, global_step=self.global_step)
 
             # Ready for the next epoch.
             seed_start = seed_end
 
     def restore(self, restore_dir=None, epoch_to_recover=None):
         """Restores the model from a saved checkpoint."""
-        saver = tf.train.Saver(tf.global_variables())
 
         if restore_dir is None:
             restore_dir = self.save_dir
@@ -998,9 +999,9 @@ class ExpRecurrentTrainer:
             if len(file) < 1:
                 raise FileNotFoundError('Epoch {} not found.'
                                         .format(epoch_to_recover))
-            saver.restore(self.sess, file[0])
+            self.saver.restore(self.sess, file[0])
         else:
-            saver.restore(self.sess, chkpt.model_checkpoint_path)
+            self.saver.restore(self.sess, chkpt.model_checkpoint_path)
 
     def calc_u(self, h_states, feed_dict, batch_size, times):
         """Calculate u(t) at the times provided."""
