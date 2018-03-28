@@ -660,6 +660,11 @@ class ExpRecurrentTrainer:
                     shape=(self.tf_batch_size, self.max_events, self.num_hidden_states),
                     dtype=self.tf_dtype
                 )
+                self.calc_u_batch_size = tf.placeholder(
+                    name='calc_u_batch_size',
+                    shape=(None,),
+                    dtype=tf.int32
+                )
 
                 self.calc_u_c_is_init = tf.matmul(self.tf_batch_init_h, self.tf_vt) + self.tf_bt
                 self.calc_u_c_is_rest = tf.split(
@@ -668,7 +673,7 @@ class ExpRecurrentTrainer:
                             self.calc_u_h_states,
                             tf.tile(
                                 tf.expand_dims(self.tf_vt, 0),
-                                [batch_size, 1, 1]
+                                [self.calc_u_batch_size[0], 1, 1]
                             )
                         ) + self.tf_bt,
                         axis=-1
@@ -691,8 +696,6 @@ class ExpRecurrentTrainer:
                     axis=1,
                     name='calc_u_is_own_event'
                 )
-
-
 
         # Here, outside the loop, add the survival term for the batch to
         # both the loss and to the LL.
@@ -1005,6 +1008,7 @@ class ExpRecurrentTrainer:
 
         # This immediately assumes that the
         feed_dict[self.calc_u_h_states] = h_states
+        feed_dict[self.calc_u_batch_size] = [batch_size]
 
         tf_seq_len = np.squeeze(
             self.sess.run(self.tf_batch_seq_len, feed_dict=feed_dict),
