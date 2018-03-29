@@ -1,5 +1,4 @@
 import numpy as np
-import datetime as D
 import os
 import redqueen.opt_model as OM
 import redqueen.utils as RU
@@ -30,9 +29,10 @@ class ExpRecurrentBroadcasterMP(OM.Broadcaster):
 
     @Deco.optioned()
     def __init__(self, src_id, seed, t_min,
-                 Wm, Wh, Wr, Wt, Bh,
+                 Wm, Wh, Wr, Wt, Bh, sim_opts,
                  wt, vt, bt, init_h, src_embed_map):
         super(ExpRecurrentBroadcasterMP, self).__init__(src_id, seed)
+        self.sink_ids = sim_opts.sink_ids
         self.init = False
 
         # Used to create h_next
@@ -71,7 +71,7 @@ class ExpRecurrentBroadcasterMP(OM.Broadcaster):
     def get_next_interval(self, event):
         if not self.init:
             self.init = True
-            self.state.set_track_src_id(self.src_id)
+            self.state.set_track_src_id(self.src_id, self.sink_ids)
             # Nothing special to do for the first event.
 
         self.state.apply_event(event)
@@ -192,7 +192,8 @@ class ExpRecurrentBroadcaster(OM.Broadcaster):
     def get_next_interval(self, event):
         if not self.init:
             self.init = True
-            self.state.set_track_src_id(self.src_id)
+            self.state.set_track_src_id(self.src_id,
+                                        self.trainer.sim_opts.sink_ids)
             # Nothing special to do for the first event.
 
         self.state.apply_event(event)
@@ -1512,4 +1513,3 @@ class ExpRecurrentTrainer:
 #             # TODO
 #             pass
 #
-
