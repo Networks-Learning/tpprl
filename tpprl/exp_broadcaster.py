@@ -97,6 +97,17 @@ class ExpRecurrentBroadcasterMP(OM.Broadcaster):
             return next_delta
 
 
+def reward_fn(df, reward_kind, reward_opts, sim_opts):
+    """Calculate the reward for this trajectory."""
+    if reward_kind == R_2_REWARD:
+        return RU.int_r_2(df, sim_opts)
+    elif reward_kind == TOP_K_REWARD:
+        return -RU.time_in_top_k(df, sim_opts=sim_opts, **reward_opts)
+    else:
+        raise NotImplementedError('{} reward function is not implemented.'
+                                  .foramt(reward_kind))
+
+
 def _worker_sim(params):
     """Worker for the parallel simulation runner."""
     rl_b_args, seed = params
@@ -107,8 +118,16 @@ def _worker_sim(params):
 
     mgr = run_sim_opts.create_manager_with_broadcaster(exp_b)
     mgr.run_dynamic(max_events=rl_b_opts.max_events + 1)
+    df = mgr.get_state().get_dataframe()
 
-    return mgr.get_state().get_dataframe()
+    reward = reward_fn(
+        df=df,
+        reward_kind=rl_b_opts.reward_kind,
+        reward_opts=rl_b_opts.reward_opts,
+        sim_opts=rl_b_opts.sim_opts
+    )
+
+    return df, reward
 
 
 def run_sims_MP(trainer, seeds, processes=None):
@@ -131,6 +150,11 @@ def run_sims_MP(trainer, seeds, processes=None):
         'vt': trainer.sess.run(trainer.tf_vt),
         'bt': trainer.sess.run(trainer.tf_bt),
         'init_h': trainer.sess.run(trainer.tf_h),
+
+        'reward_kind': trainer.reward_kind,
+        'reward_opts': {
+            'K': trainer.reward_top_k
+        }
     }
 
     # return [_worker_sim((rl_b_args, seed)) for seed in seeds]
@@ -420,7 +444,6 @@ def mk_def_exp_recurrent_trainer_opts(num_other_broadcasters, hidden_dims,
         clip_norm=1.0,
 
         momentum=0.9,
-        q=100.0,
 
         device_cpu='/cpu:0',
         device_gpu='/gpu:0',
@@ -441,7 +464,7 @@ class ExpRecurrentTrainer:
     def __init__(self, Wm, Wh, Wt, Wr, Bh, vt, wt, bt, num_hidden_states,
                  sess, sim_opts, scope, t_min, batch_size, max_events,
                  learning_rate, clip_norm, with_dynamic_rnn,
-                 summary_dir, save_dir, decay_steps, decay_rate, momentum, q,
+                 summary_dir, save_dir, decay_steps, decay_rate, momentum,
                  reward_top_k, reward_kind, device_cpu, device_gpu, only_cpu):
         """Initialize the trainer with the policy parameters."""
 
@@ -464,7 +487,7 @@ class ExpRecurrentTrainer:
         self.decay_steps = decay_steps
         self.clip_norm = clip_norm
 
-        self.q = q  # Loss is blown up by a factor of q / 2
+        self.q = sim_opts.q  # Loss is blown up by a factor of q / 2
         self.batch_size = batch_size
 
         self.tf_batch_size = None
@@ -779,7 +802,9 @@ class ExpRecurrentTrainer:
 
         # There are other global variables as well, like the ones which the
         # ADAM optimizer uses.
-        self.saver = tf.train.Saver(tf.global_variables())
+        self.saver = tf.train.Saver(tf.global_variables(),
+                                    keep_checkpoint_every_n_hours=0.25,
+                                    max_to_keep=100)
 
         with tf.device(device_cpu):
             tf.contrib.training.add_gradients_summaries(self.avg_gradient)
@@ -833,28 +858,6 @@ class ExpRecurrentTrainer:
         mgr.run_dynamic(max_events=self.max_events + 1)
         return mgr.get_state().get_dataframe()
 
-    def reward_fn(self, df):
-        """Calculate the reward for the given trajectory."""
-        if self.reward_kind == R_2_REWARD:
-            return self.reward_r_2_fn(df)
-        elif self.reward_kind == TOP_K_REWARD:
-            return self.reward_top_k_fn(df, K=self.reward_top_k)
-
-    def reward_r_2_fn(self, df):
-        """Calculate the reward for a given trajectory."""
-        # TODO: Can probably be replaced with RU.int_r_2(df, self.sim_opts)
-        rank_in_tau = RU.rank_of_src_in_df(df=df.iloc[:self.max_events, ],
-                                           src_id=self.src_id).mean(axis=1)
-
-        last_time = self.sim_opts.end_time if df.shape[0] <= self.max_events else df['t'].iloc[self.max_events]
-        rank_dt = np.diff(np.concatenate([rank_in_tau.index.values,
-                                          [last_time]]))
-        return np.sum((rank_in_tau ** 2) * rank_dt)
-
-    def reward_top_k_fn(self, df, K):
-        """Calculate the reward of top_k. It is negative because we intend to minimize it."""
-        return -RU.time_in_top_k(df, K=K, sim_opts=self.sim_opts)
-
     def get_feed_dict(self, batch_df, is_test=False, pre_comp_batch_rewards=None):
         """Produce a feed_dict for the given batch."""
 
@@ -870,8 +873,18 @@ class ExpRecurrentTrainer:
 
         full_shape = (batch_size, self.max_events)
 
-        batch_rewards = pre_comp_batch_rewards if pre_comp_batch_rewards is not None \
-            else np.asarray([self.reward_fn(x) for x in batch_df])[:, np.newaxis]
+        if pre_comp_batch_rewards is not None:
+            batch_rewards = np.reshape(pre_comp_batch_rewards, (-1, 1))
+        else:
+            batch_rewards = np.asarray([
+                reward_fn(
+                    df=x,
+                    reward_kind=self.reward_kind,
+                    reward_opts={'K': self.reward_top_k},
+                    sim_opts=self.sim_opts
+                )
+                for x in batch_df
+            ])[:, np.newaxis]
 
         batch_t_deltas = np.zeros(shape=full_shape, dtype=float)
 
@@ -910,7 +923,15 @@ class ExpRecurrentTrainer:
     def get_batch_grad(self, batch):
         """Returns the true gradient, given a feed dictionary generated by get_feed_dict."""
         feed_dict = self.get_feed_dict(batch)
-        batch_rewards = [self.reward_fn(x) for x in batch]
+        batch_rewards = [
+            self.reward_fn(
+                x,
+                reward_kind=self.reward_kind,
+                reward_opts={'K': self.reward_top_k},
+                sim_opts=self.sim_opts
+            )
+            for x in batch
+        ]
 
         # The gradients are already summed over the batch dimension.
         LL_grads, losses, loss_grads = self.sess.run([self.LL_grads, self.loss, self.loss_grads],
@@ -966,14 +987,19 @@ class ExpRecurrentTrainer:
 
             seeds = range(seed_start, seed_end)
             if not with_MP:
-                for seed in seeds:
-                    batch.append(self.run_sim(seed))
+                batch = [self.run_sim(seed) for seed in seeds]
+                pre_comp_batch_rewards = None
             else:
-                # TODO: use pre_comp_batch_rewards to calculate the reward
-                # individually for each process as well.
-                batch = run_sims_MP(trainer=self, seeds=seeds)
+                batch, pre_comp_batch_rewards = zip(*run_sims_MP(trainer=self, seeds=seeds))
 
-            f_d = self.get_feed_dict(batch)
+            num_events = [df.event_id.nunique() for df in batch]
+            num_our_events = [RU.num_tweets_of(df, sim_opts=self.sim_opts)
+                              for df in batch]
+
+            f_d = self.get_feed_dict(
+                batch,
+                pre_comp_batch_rewards=pre_comp_batch_rewards
+            )
 
             if with_summaries:
                 reward, LL, loss, grad_norm, summaries, step, lr, _ = \
@@ -994,14 +1020,16 @@ class ExpRecurrentTrainer:
             mean_loss = np.mean(loss)
             mean_reward = np.mean(reward)
 
-            print('{} Run {}, LL {:.5f}, loss {:.5f}, R(t) {:.5f}'
-                  ', CTG {:.5f}, seeds {}--{}, grad_norm {:.5f}, step = {}, lr = {:.5f}'
+            print('{} Run {}, LL {:.5f}, loss {:.5f}, Rwd {:.5f}'
+                  ', CTG {:.5f}, seeds {}--{}, grad_norm {:.5f}, step = {}'
+                  ', lr = {:.5f}, events = {:.2f}/{:.2f}'
                   .format(_now(), epoch, mean_LL, mean_loss,
                           mean_reward, mean_reward + mean_loss,
-                          seed_start, seed_end - 1, grad_norm, step, lr))
+                          seed_start, seed_end - 1, grad_norm, step, lr,
+                          np.mean(num_our_events), np.mean(num_events)))
 
             chkpt_file = os.path.join(self.save_dir, 'tpprl.ckpt')
-            self.saver.save(self.sess, chkpt_file, global_step=self.global_step)
+            self.saver.save(self.sess, chkpt_file, global_step=self.global_step,)
 
             # Ready for the next epoch.
             seed_start = seed_end
