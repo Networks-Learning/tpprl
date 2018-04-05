@@ -13,6 +13,9 @@ from utils import variable_summaries, _now, average_gradients
 SAVE_DIR = 'tpprl-log'
 os.makedirs(SAVE_DIR, exist_ok=True)
 
+R_2_REWARD = 'r_2_reward'
+TOP_K_REWARD = 'top_k_reward'
+
 
 class ExpRecurrentBroadcasterMP(OM.Broadcaster):
     """This is a broadcaster which follows the intensity function as defined by
@@ -425,7 +428,9 @@ def mk_def_exp_recurrent_trainer_opts(num_other_broadcasters, hidden_dims,
 
         save_dir=SAVE_DIR,
 
-        summary_dir=None  # Expected: './tpprl.summary/train-{}/'.format(run)
+        summary_dir=None,  # Expected: './tpprl.summary/train-{}/'.format(run)
+        reward_kind=R_2_REWARD,
+        reward_top_k=-1,
     )
 
     return def_exp_recurrent_trainer_opts.set(**kwargs)
@@ -437,8 +442,11 @@ class ExpRecurrentTrainer:
                  sess, sim_opts, scope, t_min, batch_size, max_events,
                  learning_rate, clip_norm, with_dynamic_rnn,
                  summary_dir, save_dir, decay_steps, decay_rate, momentum, q,
-                 device_cpu, device_gpu, only_cpu):
+                 reward_top_k, reward_kind, device_cpu, device_gpu, only_cpu):
         """Initialize the trainer with the policy parameters."""
+
+        self.reward_top_k = reward_top_k
+        self.reward_kind = reward_kind
 
         self.t_min = t_min
         self.summary_dir = summary_dir
@@ -810,16 +818,14 @@ class ExpRecurrentTrainer:
     def run_sim(self, seed, randomize_other_sources=True):
         """Run one simulation and return the dataframe.
         Will be thread-safe and can be called multiple times."""
-        run_sim_opts = self.sim_opts.update({})
+        run_sim_opts = self.sim_opts.copy()
 
         if randomize_other_sources:
-            for idx, (x, y) in enumerate(run_sim_opts.other_sources):
-                assert 'seed' in y, 'Do not know how to randomize {}.'.format(x)
-                y['seed'] = seed + 99 * idx
+            run_sim_opts = run_sim_opts.randomize_other_sources(using_seed=seed)
 
         exp_b = self._create_exp_broadcaster(seed=seed * 3)
-
         mgr = run_sim_opts.create_manager_with_broadcaster(exp_b)
+
         # The +1 is to allow us to detect when the number of events is
         # too large to fit in our buffer.
         # Otherwise, we always assume that the sequence didn't produce another
@@ -828,7 +834,15 @@ class ExpRecurrentTrainer:
         return mgr.get_state().get_dataframe()
 
     def reward_fn(self, df):
+        """Calculate the reward for the given trajectory."""
+        if self.reward_kind == R_2_REWARD:
+            return self.reward_r_2_fn(df)
+        elif self.reward_kind == TOP_K_REWARD:
+            return self.reward_top_k_fn(df, K=self.reward_top_k)
+
+    def reward_r_2_fn(self, df):
         """Calculate the reward for a given trajectory."""
+        # TODO: Can probably be replaced with RU.int_r_2(df, self.sim_opts)
         rank_in_tau = RU.rank_of_src_in_df(df=df.iloc[:self.max_events, ],
                                            src_id=self.src_id).mean(axis=1)
 
@@ -837,7 +851,11 @@ class ExpRecurrentTrainer:
                                           [last_time]]))
         return np.sum((rank_in_tau ** 2) * rank_dt)
 
-    def get_feed_dict(self, batch_df, is_test=False):
+    def reward_top_k_fn(self, df, K):
+        """Calculate the reward of top_k. It is negative because we intend to minimize it."""
+        return -RU.time_in_top_k(df, K=K, sim_opts=self.sim_opts)
+
+    def get_feed_dict(self, batch_df, is_test=False, pre_comp_batch_rewards=None):
         """Produce a feed_dict for the given batch."""
 
         assert all(len(df.sink_id.unique()) == 1 for df in batch_df), "Can only handle one sink at the moment."
@@ -852,7 +870,9 @@ class ExpRecurrentTrainer:
 
         full_shape = (batch_size, self.max_events)
 
-        batch_rewards = np.asarray([self.reward_fn(x) for x in batch_df])[:, np.newaxis]
+        batch_rewards = pre_comp_batch_rewards if pre_comp_batch_rewards is not None \
+            else np.asarray([self.reward_fn(x) for x in batch_df])[:, np.newaxis]
+
         batch_t_deltas = np.zeros(shape=full_shape, dtype=float)
 
         batch_b_idxes = np.zeros(shape=full_shape, dtype=int)
@@ -929,9 +949,8 @@ class ExpRecurrentTrainer:
     def train_many(self, num_iters, init_seed=42,
                    clipping=True, with_summaries=False, with_MP=False):
         """Run one SGD op given a batch of simulation."""
-        # TODO: First determine whether we are applying the gradients in the
-        # correct direction.
-        seed_start = init_seed
+
+        seed_start = init_seed + self.sess.run(self.global_step) * self.batch_size
 
         if with_summaries:
             assert self.summary_dir is not None
@@ -950,6 +969,8 @@ class ExpRecurrentTrainer:
                 for seed in seeds:
                     batch.append(self.run_sim(seed))
             else:
+                # TODO: use pre_comp_batch_rewards to calculate the reward
+                # individually for each process as well.
                 batch = run_sims_MP(trainer=self, seeds=seeds)
 
             f_d = self.get_feed_dict(batch)
@@ -973,7 +994,7 @@ class ExpRecurrentTrainer:
             mean_loss = np.mean(loss)
             mean_reward = np.mean(reward)
 
-            print('{} Run {}, LL {:.5f}, loss {:.5f}, r^2(t) {:.5f}'
+            print('{} Run {}, LL {:.5f}, loss {:.5f}, R(t) {:.5f}'
                   ', CTG {:.5f}, seeds {}--{}, grad_norm {:.5f}, step = {}, lr = {:.5f}'
                   .format(_now(), epoch, mean_LL, mean_loss,
                           mean_reward, mean_reward + mean_loss,
