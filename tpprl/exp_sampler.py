@@ -1,6 +1,8 @@
-"""This file contains the samplers implemented using numpy only."""
+"""This file contains the samplers implemented using numpy and RedQueen
+compatible broadcasters (both single-threaded and multi-threaded versions)."""
 import decorated_options as Deco
 import numpy as np
+import redqueen.opt_model as OM
 
 
 class CDFSampler:
@@ -174,3 +176,165 @@ class SigmoidCDFSampler(CDFSampler):
                                             1 / (1 + np.exp(c)) -
                                             np.log1p(np.exp(c)))
 
+
+class ExpRecurrentBroadcasterMP(OM.Broadcaster):
+    """This is a broadcaster which follows the intensity function as defined by
+    RMTPP paper and updates the hidden state upon receiving each event.
+
+    TODO: The problem is that calculation of the gradient and the loss/LL
+    becomes too complicated with numerical stability issues very quickly. Need
+    to implement adaptive scaling to handle that issue.
+
+    Also, this embeds the event history implicitly and the state function does
+    not explicitly model the loss function J(.) faithfully. This is an issue
+    with the theory.
+    """
+
+    @Deco.optioned()
+    def __init__(self, src_id, seed, t_min,
+                 Wm, Wh, Wr, Wt, Bh, sim_opts,
+                 wt, vt, bt, init_h, src_embed_map):
+        super(ExpRecurrentBroadcasterMP, self).__init__(src_id, seed)
+        self.sink_ids = sim_opts.sink_ids
+        self.init = False
+
+        # Used to create h_next
+        self.Wm = Wm
+        self.Wh = Wh
+        self.Wr = Wr
+        self.Wt = Wt
+        self.Bh = Bh
+        self.cur_h = init_h
+        self.src_embed_map = src_embed_map
+
+        # Needed for the sampler
+        self.params = Deco.Options(**{
+            'wt': wt,
+            'vt': vt,
+            'bt': bt,
+            'init_h': init_h
+        })
+
+        self.exp_sampler = ExpCDFSampler(_opts=self.params,
+                                         t_min=t_min,
+                                         seed=seed + 1)
+
+    def update_hidden_state(self, src_id, time_delta):
+        """Returns the hidden state after a post by src_id and time delta."""
+        # Best done using self.sess.run here.
+        r_t = self.state.get_wall_rank(self.src_id, self.sink_ids, dict_form=False)
+        return np.tanh(
+            self.Wm[self.src_embed_map[src_id], :][:, np.newaxis] +
+            self.Wh.dot(self.cur_h) +
+            self.Wr * np.asarray([np.mean(r_t)]).reshape(-1) +
+            self.Wt * time_delta +
+            self.Bh
+        )
+
+    def get_next_interval(self, event):
+        if not self.init:
+            self.init = True
+            self.state.set_track_src_id(self.src_id, self.sink_ids)
+            # Nothing special to do for the first event.
+
+        self.state.apply_event(event)
+
+        if event is None:
+            # This is the first event. Post immediately to join the party?
+            # Or hold off?
+            # Currently, it is waiting.
+            return self.exp_sampler.generate_sample()
+        else:
+            self.cur_h = self.update_hidden_state(event.src_id, event.time_delta)
+            next_post_time = self.exp_sampler.register_event(
+                event.cur_time,
+                self.cur_h,
+                own_event=event.src_id == self.src_id
+            )
+            next_delta = next_post_time - self.last_self_event_time
+            # print(next_delta)
+            assert next_delta >= 0
+            return next_delta
+
+
+class ExpRecurrentBroadcaster(OM.Broadcaster):
+    """This is a broadcaster which follows the intensity function as defined by
+    RMTPP paper and updates the hidden state upon receiving each event.
+
+    TODO: The problem is that calculation of the gradient and the loss/LL
+    becomes too complicated with numerical stability issues very quickly. Need
+    to implement adaptive scaling to handle that issue.
+
+    Also, this embeds the event history implicitly and the state function does
+    not explicitly model the loss function J(.) faithfully. This is an issue
+    with the theory.
+    """
+
+    @Deco.optioned()
+    def __init__(self, src_id, seed, trainer, t_min=0):
+        super(ExpRecurrentBroadcaster, self).__init__(src_id, seed)
+        self.init = False
+
+        self.trainer = trainer
+
+        self.params = Deco.Options(**self.trainer.sess.run({
+            # 'Wm': trainer.tf_Wm,
+            # 'Wh': trainer.tf_Wh,
+            # 'Bh': trainer.tf_Bh,
+            # 'Wt': trainer.tf_Wt,
+            # 'Wr': trainer.tf_Wr,
+
+            'wt': trainer.tf_wt,
+            'vt': trainer.tf_vt,
+            'bt': trainer.tf_bt,
+            'init_h': trainer.tf_h
+        }))
+
+        self.cur_h = self.params.init_h
+
+        self.exp_sampler = ExpCDFSampler(_opts=self.params,
+                                         t_min=t_min,
+                                         seed=seed + 1)
+
+    def update_hidden_state(self, src_id, time_delta):
+        """Returns the hidden state after a post by src_id and time delta."""
+        # Best done using self.sess.run here.
+        r_t = self.state.get_wall_rank(self.src_id, self.sink_ids, dict_form=False)
+
+        feed_dict = {
+            self.trainer.tf_b_idx: np.asarray([self.trainer.src_embed_map[src_id]]),
+            self.trainer.tf_t_delta: np.asarray([time_delta]).reshape(-1),
+            self.trainer.tf_h: self.cur_h,
+            self.trainer.tf_rank: np.asarray([np.mean(r_t)]).reshape(-1)
+        }
+        return self.trainer.sess.run(self.trainer.tf_h_next,
+                                     feed_dict=feed_dict)
+
+    def get_next_interval(self, event):
+        if not self.init:
+            self.init = True
+            self.state.set_track_src_id(self.src_id,
+                                        self.trainer.sim_opts.sink_ids)
+            # Nothing special to do for the first event.
+
+        self.state.apply_event(event)
+
+        if event is None:
+            # This is the first event. Post immediately to join the party?
+            # Or hold off?
+            # Currently, it is waiting.
+            return self.exp_sampler.generate_sample()
+        else:
+            self.cur_h = self.update_hidden_state(event.src_id, event.time_delta)
+            next_post_time = self.exp_sampler.register_event(
+                event.cur_time,
+                self.cur_h,
+                own_event=event.src_id == self.src_id
+            )
+            next_delta = next_post_time - self.last_self_event_time
+            # print(next_delta)
+            assert next_delta >= 0
+            return next_delta
+
+
+OM.SimOpts.registerSource('ExpRecurrentBroadcaster', ExpRecurrentBroadcaster)
