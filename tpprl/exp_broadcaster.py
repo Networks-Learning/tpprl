@@ -4,11 +4,11 @@ import redqueen.utils as RU
 import tensorflow as tf
 import decorated_options as Deco
 import exp_sampler
-import cells
 import multiprocessing as MP
 
 from utils import variable_summaries, _now, average_gradients
 
+from cells import TPPRExpCell, TPPRExpCellStacked
 
 SAVE_DIR = 'tpprl-log'
 os.makedirs(SAVE_DIR, exist_ok=True)
@@ -254,78 +254,21 @@ class ExpRecurrentTrainer:
                                                                shape=(inf_batch_size, self.num_hidden_states),
                                                                dtype=self.tf_dtype)
 
-                # self.LL = tf.zeros(name='log_likelihood', dtype=self.tf_dtype, shape=(self.tf_batch_size))
-                # self.loss = tf.zeros(name='loss', dtype=self.tf_dtype, shape=(self.tf_batch_size))
+                # t_0 = tf.zeros(name='event_time', shape=(inf_batch_size,), dtype=self.tf_dtype)
 
-                t_0 = tf.zeros(name='event_time', shape=(inf_batch_size,), dtype=self.tf_dtype)
+                # def batch_u_theta(batch_t_deltas):
+                #     return tf.exp(
+                #         tf.matmul(tf_batch_h_t, self.tf_vt) +
+                #         self.tf_wt * tf.expand_dims(batch_t_deltas, 1) +
+                #         self.tf_bt
+                #     )
 
-                def batch_u_theta(batch_t_deltas):
-                    return tf.exp(
-                        tf.matmul(tf_batch_h_t, self.tf_vt) +
-                        self.tf_wt * tf.expand_dims(batch_t_deltas, 1) +
-                        self.tf_bt
-                    )
+                assert with_dynamic_rnn, "The non-dynamic-RNN path has been removed."
 
-                # TODO: Convert this to a tf.while_loop, perhaps.
-                # The performance benefit is debatable, but the graph may be constructed faster.
-                if not with_dynamic_rnn:
-                    self.h_states = []
-                    self.LL_log_terms = []
-                    self.LL_int_terms = []
-                    self.loss_terms = []
+                # Stacked version (for performance)
 
-                    for evt_idx in range(max_events):
-                        tf_batch_h_t = tf.where(
-                            tf.tile(evt_idx < self.tf_batch_seq_len, [1, self.num_hidden_states]),
-                            tf.nn.tanh(
-                                tf.nn.embedding_lookup(self.tf_Wm,
-                                                       self.tf_batch_b_idxes[:, evt_idx]) +
-                                tf.matmul(tf_batch_h_t, self.tf_Wh, transpose_b=True) +
-                                tf.matmul(tf.expand_dims(self.tf_batch_ranks[:, evt_idx], 1),
-                                          self.tf_Wr, transpose_b=True) +
-                                tf.matmul(tf.expand_dims(self.tf_batch_t_deltas[:, evt_idx], 1),
-                                          self.tf_Wt, transpose_b=True) +
-                                tf.tile(tf.transpose(self.tf_Bh), [inf_batch_size, 1])
-                            ),
-                            tf_batch_h_t
-                            # tf.zeros(dtype=self.tf_dtype, shape=(inf_batch_size, self.num_hidden_states))
-                            # The gradient of a constant w.r.t. a variable is None or 0
-                        )
-                        tf_batch_u_theta = tf.where(
-                            evt_idx < self.tf_batch_seq_len,
-                            batch_u_theta(self.tf_batch_t_deltas[:, evt_idx]),
-                            tf.zeros(dtype=self.tf_dtype, shape=(inf_batch_size, 1))
-                        )
-
-                        self.h_states.append(tf_batch_h_t)
-                        self.LL_log_terms.append(tf.where(
-                            tf.squeeze(evt_idx < self.tf_batch_seq_len),
-                            tf.where(
-                                tf.equal(self.tf_batch_b_idxes[:, evt_idx], 0),
-                                tf.squeeze(tf.log(tf_batch_u_theta)),
-                                tf.zeros(dtype=self.tf_dtype, shape=(inf_batch_size,))),
-                            tf.zeros(dtype=self.tf_dtype, shape=(inf_batch_size,))))
-
-                        self.LL_int_terms.append(tf.where(
-                            tf.squeeze(evt_idx < self.tf_batch_seq_len),
-                            (1 / self.tf_wt) * tf.squeeze(
-                                tf_batch_u_theta -
-                                batch_u_theta(t_0)
-                            ),
-                            tf.zeros(dtype=self.tf_dtype, shape=(inf_batch_size,))))
-
-                        self.loss_terms.append(tf.where(
-                            tf.squeeze(evt_idx < self.tf_batch_seq_len),
-                            (1 / (2 * self.tf_wt)) * tf.squeeze(
-                                tf.square(tf_batch_u_theta) -
-                                tf.square(batch_u_theta(t_0))
-                            ),
-                            tf.zeros(dtype=self.tf_dtype, shape=(inf_batch_size,))))
-
-                    self.LL = tf.add_n(self.LL_log_terms) - tf.add_n(self.LL_int_terms)
-                    self.loss = tf.add_n(self.loss_terms)
-                else:
-                    rnn_cell = cells.TPPRExpCell(
+                with tf.name_scope('batched'):
+                    self.rnn_cell = TPPRExpCell(
                         hidden_state_size=(None, self.num_hidden_states),
                         output_size=[self.num_hidden_states] + [1] * 3,
                         src_id=sim_opts.src_id,
@@ -336,7 +279,7 @@ class ExpRecurrentTrainer:
                     )
 
                     ((self.h_states, LL_log_terms, LL_int_terms, loss_terms), tf_batch_h_t) = tf.nn.dynamic_rnn(
-                        rnn_cell,
+                        self.rnn_cell,
                         inputs=(tf.expand_dims(self.tf_batch_b_idxes, axis=-1),
                                 tf.expand_dims(self.tf_batch_ranks, axis=-1),
                                 tf.expand_dims(self.tf_batch_t_deltas, axis=-1)),
@@ -348,8 +291,131 @@ class ExpRecurrentTrainer:
                     self.LL_int_terms = tf.squeeze(LL_int_terms, axis=-1)
                     self.loss_terms = tf.squeeze(loss_terms, axis=-1)
 
-                    self.LL = tf.reduce_sum(self.LL_log_terms, axis=1) - tf.reduce_sum(self.LL_int_terms, axis=1)
-                    self.loss = tf.reduce_sum(self.loss_terms, axis=1)
+                    # Survival terms for LL and loss.
+                    # self.LL_last = -(1 / self.tf_wt) * tf.squeeze(
+                    #     batch_u_theta(self.tf_batch_last_interval) - batch_u_theta(t_0)
+                    # )
+
+                    # self.loss_last = (1 / (2 * self.tf_wt)) * tf.squeeze(
+                    #     tf.square(batch_u_theta(self.tf_batch_last_interval)) -
+                    #     tf.square(batch_u_theta(t_0))
+                    # )
+
+                    self.LL_last = self.rnn_cell.last_LL(tf_batch_h_t, self.tf_batch_last_interval)
+                    self.loss_last = self.rnn_cell.last_loss(tf_batch_h_t, self.tf_batch_last_interval)
+
+                    self.LL = tf.reduce_sum(self.LL_log_terms, axis=1) - tf.reduce_sum(self.LL_int_terms, axis=1) + self.LL_last
+                    self.loss = (self.q / 2) * (tf.reduce_sum(self.loss_terms, axis=1) + self.loss_last)
+
+                # Stacked version (for performance)
+
+                with tf.name_scope('stacked'):
+
+                    (self.Wm_mini, self.Wr_mini, self.Wh_mini,
+                     self.Wt_mini, self.Bh_mini, self.wt_mini,
+                     self.vt_mini, self.bt_mini) = [
+                         tf.stack(x, name=name)
+                         for x, name in zip(
+                                 zip(*[
+                                     (tf.identity(self.tf_Wm), tf.identity(self.tf_Wr),
+                                      tf.identity(self.tf_Wh), tf.identity(self.tf_Wt),
+                                      tf.identity(self.tf_Bh), tf.identity(self.tf_wt),
+                                      tf.identity(self.tf_vt), tf.identity(self.tf_bt))
+                                     for _ in range(self.batch_size)
+                                 ]),
+                                 ['Wm', 'Wr', 'Wh', 'Wt', 'Bh', 'wt', 'vt', 'bt']
+                         )
+                    ]
+
+                    self.rnn_cell_stack = TPPRExpCellStacked(
+                        hidden_state_size=(None, self.num_hidden_states),
+                        output_size=[self.num_hidden_states] + [1] * 3,
+                        src_id=sim_opts.src_id,
+                        tf_dtype=self.tf_dtype,
+                        Wm=self.Wm_mini, Wr=self.Wr_mini,
+                        Wh=self.Wh_mini, Wt=self.Wt_mini,
+                        Bh=self.Bh_mini, wt=self.wt_mini,
+                        vt=self.vt_mini, bt=self.bt_mini
+                    )
+
+                    ((self.h_states_stack, LL_log_terms_stack, LL_int_terms_stack, loss_terms_stack), tf_batch_h_t_mini) = tf.nn.dynamic_rnn(
+                        self.rnn_cell_stack,
+                        inputs=(tf.expand_dims(self.tf_batch_b_idxes, axis=-1),
+                                tf.expand_dims(self.tf_batch_ranks, axis=-1),
+                                tf.expand_dims(self.tf_batch_t_deltas, axis=-1)),
+                        sequence_length=tf.squeeze(self.tf_batch_seq_len, axis=-1),
+                        dtype=self.tf_dtype,
+                        initial_state=self.tf_batch_init_h
+                    )
+
+                    # Unfortunately, this version is way too slow,
+                    # both in the forward and the backward pass.
+                    # (tf_batch_b_idxes_mini, tf_batch_t_deltas_mini,
+                    #  tf_batch_ranks_mini, tf_batch_seq_len_mini,
+                    #  tf_batch_last_interval_mini, tf_batch_init_h_mini) = [
+                    #      tf.split(tensor, self.batch_size, axis=0)
+                    #      for tensor in [self.tf_batch_b_idxes,
+                    #                     self.tf_batch_t_deltas,
+                    #                     self.tf_batch_ranks,
+                    #                     self.tf_batch_seq_len,
+                    #                     self.tf_batch_last_interval,
+                    #                     self.tf_batch_init_h]
+                    # ]
+
+                    # h_states_stack = []
+                    # LL_log_terms_stack = []
+                    # LL_int_terms_stack = []
+                    # loss_terms_stack = []
+
+                    # LL_last_term_stack = []
+                    # loss_last_term_stack = []
+
+
+                    # for idx in range(self.batch_size):
+                    #     rnn_cell = TPPRExpCell(
+                    #         hidden_state_size=(1, self.num_hidden_states),
+                    #         output_size=[self.num_hidden_states] + [1] * 3,
+                    #         src_id=sim_opts.src_id,
+                    #         tf_dtype=self.tf_dtype,
+                    #         Wm=self.Wm_mini[idx], Wr=self.Wr_mini[idx],
+                    #         Wh=self.Wh_mini[idx], Wt=self.Wt_mini[idx],
+                    #         Bh=self.Bh_mini[idx], wt=self.wt_mini[idx],
+                    #         vt=self.vt_mini[idx], bt=self.bt_mini[idx]
+                    #     )
+
+                    #     ((h_states_mini, LL_log_terms_mini, LL_int_terms_mini, loss_terms_mini), tf_batch_h_t_mini) = tf.nn.dynamic_rnn(
+                    #         rnn_cell,
+                    #         inputs=(tf.expand_dims(tf_batch_b_idxes_mini[idx], axis=-1),
+                    #                 tf.expand_dims(tf_batch_ranks_mini[idx], axis=-1),
+                    #                 tf.expand_dims(tf_batch_t_deltas_mini[idx], axis=-1)),
+                    #         sequence_length=tf.squeeze(tf_batch_seq_len_mini[idx], axis=-1),
+                    #         dtype=self.tf_dtype,
+                    #         initial_state=tf_batch_init_h_mini[idx]
+                    #     )
+
+                    #     h_states_stack.append(h_states_mini[0])
+                    #     LL_log_terms_stack.append(LL_log_terms_mini[0])
+                    #     LL_int_terms_stack.append(LL_int_terms_mini[0])
+                    #     loss_terms_stack.append(loss_terms_mini[0])
+
+                    # self.h_states_stack = tf.stack(h_states_stack)
+
+                    # self.LL_log_terms_stack = tf.squeeze(tf.stack(LL_log_terms_stack), axis=-1)
+                    # self.LL_int_terms_stack = tf.squeeze(tf.stack(LL_int_terms_stack), axis=-1)
+                    # self.loss_terms_stack = tf.squeeze(tf.stack(loss_terms_stack), axis=-1)
+
+                    self.LL_log_terms_stack = tf.squeeze(LL_log_terms_stack, axis=-1)
+                    self.LL_int_terms_stack = tf.squeeze(LL_int_terms_stack, axis=-1)
+                    self.loss_terms_stack = tf.squeeze(loss_terms_stack, axis=-1)
+
+                    # LL_last_term_stack = rnn_cell.last_LL(tf_batch_h_t_mini, self.tf_batch_last_interval)
+                    # loss_last_term_stack = rnn_cell.last_loss(tf_batch_h_t_mini, self.tf_batch_last_interval)
+
+                    self.LL_last_term_stack = self.rnn_cell_stack.last_LL(tf_batch_h_t_mini, self.tf_batch_last_interval)
+                    self.loss_last_term_stack = self.rnn_cell_stack.last_loss(tf_batch_h_t_mini, self.tf_batch_last_interval)
+
+                    self.LL_stack = (tf.reduce_sum(self.LL_log_terms_stack, axis=1) - tf.reduce_sum(self.LL_int_terms_stack, axis=1)) + self.LL_last_term_stack
+                    self.loss_stack = (self.q / 2) * (tf.reduce_sum(self.loss_terms_stack, axis=1) + self.loss_last_term_stack)
 
             with tf.name_scope('calc_u'):
                 # These are operations needed to calculate u(t) in post-processing.
@@ -401,23 +467,9 @@ class ExpRecurrentTrainer:
                     name='calc_u_is_own_event'
                 )
 
-        # Here, outside the loop, add the survival term for the batch to
-        # both the loss and to the LL.
-        self.LL_last = -(1 / self.tf_wt) * tf.squeeze(
-            batch_u_theta(self.tf_batch_last_interval) - batch_u_theta(t_0)
-        )
-
-        self.loss_last = (1 / (2 * self.tf_wt)) * tf.squeeze(
-            tf.square(batch_u_theta(self.tf_batch_last_interval)) -
-            tf.square(batch_u_theta(t_0))
-        )
-
-        self.LL += self.LL_last
-        self.loss += self.loss_last
-        self.loss *= self.q / 2
-
         self.all_tf_vars = [self.tf_Wh, self.tf_Wm, self.tf_Wt, self.tf_Bh,
                             self.tf_Wr, self.tf_bt, self.tf_vt, self.tf_wt]
+
 
         # The gradients are added over the batch if made into a single call.
         # TODO: Perhaps there is a faster way of calculating these gradients?
@@ -427,6 +479,14 @@ class ExpRecurrentTrainer:
         self.loss_grads = {x: [tf.gradients(y, x)
                                for y in tf.split(self.loss, self.batch_size)]
                            for x in self.all_tf_vars}
+
+        self.all_mini_vars = [self.Wh_mini, self.Wm_mini, self.Wt_mini, self.Bh_mini,
+                              self.Wr_mini, self.bt_mini, self.vt_mini, self.wt_mini]
+
+        self.LL_grad_stacked = {x: tf.gradients(self.LL_stack, x)
+                                for x in self.all_mini_vars}
+        self.loss_grad_stacked = {x: tf.gradients(self.loss_stack, x)
+                                  for x in self.all_mini_vars}
 
         # Attempt to calculate the gradient within TensorFlow for the entire
         # batch, without moving to the CPU.
