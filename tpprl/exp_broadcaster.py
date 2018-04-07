@@ -467,47 +467,97 @@ class ExpRecurrentTrainer:
                     name='calc_u_is_own_event'
                 )
 
+        # TODO: The all_tf_vars and all_mini_vars MUST be kept in sync.
         self.all_tf_vars = [self.tf_Wh, self.tf_Wm, self.tf_Wt, self.tf_Bh,
                             self.tf_Wr, self.tf_bt, self.tf_vt, self.tf_wt]
-
-
-        # The gradients are added over the batch if made into a single call.
-        # TODO: Perhaps there is a faster way of calculating these gradients?
-        self.LL_grads = {x: [tf.gradients(y, x)
-                             for y in tf.split(self.LL, self.batch_size)]
-                         for x in self.all_tf_vars}
-        self.loss_grads = {x: [tf.gradients(y, x)
-                               for y in tf.split(self.loss, self.batch_size)]
-                           for x in self.all_tf_vars}
 
         self.all_mini_vars = [self.Wh_mini, self.Wm_mini, self.Wt_mini, self.Bh_mini,
                               self.Wr_mini, self.bt_mini, self.vt_mini, self.wt_mini]
 
-        self.LL_grad_stacked = {x: tf.gradients(self.LL_stack, x)
-                                for x in self.all_mini_vars}
-        self.loss_grad_stacked = {x: tf.gradients(self.loss_stack, x)
-                                  for x in self.all_mini_vars}
+        with tf.name_scope('split_gard'):
 
-        # Attempt to calculate the gradient within TensorFlow for the entire
-        # batch, without moving to the CPU.
-        self.tower_gradients = [
-            # TODO: This looks horribly inefficient and should be replaced
-            # by matrix multiplication soon.
-            [(((tf.gather(self.tf_batch_rewards, idx) + tf.gather(self.loss, idx)) * self.LL_grads[x][idx][0] +
-               self.loss_grads[x][idx][0]),
-              x) for x in self.all_tf_vars]
-            for idx in range(self.batch_size)
-        ]
+            # The gradients are added over the batch if made into a single call.
+            # TODO: Perhaps there is a faster way of calculating these gradients?
+            self.LL_grads = {x: [tf.gradients(y, x)
+                                 for y in tf.split(self.LL, self.batch_size)]
+                             for x in self.all_tf_vars}
+            self.loss_grads = {x: [tf.gradients(y, x)
+                                   for y in tf.split(self.loss, self.batch_size)]
+                               for x in self.all_tf_vars}
 
-        self.avg_gradient = average_gradients(self.tower_gradients)
-        self.clipped_avg_gradients, self.grad_norm = \
-            tf.clip_by_global_norm([grad for grad, _ in self.avg_gradient],
-                                   clip_norm=self.clip_norm)
+            # Attempt to calculate the gradient within TensorFlow for the entire
+            # batch, without moving to the CPU.
+            self.tower_gradients = [
+                # TODO: This looks horribly inefficient and should be replaced
+                # by matrix multiplication soon.
+                [(((tf.gather(self.tf_batch_rewards, idx) + tf.gather(self.loss, idx)) * self.LL_grads[x][idx][0] +
+                   self.loss_grads[x][idx][0]),
+                  x) for x in self.all_tf_vars]
+                for idx in range(self.batch_size)
+            ]
 
-        self.clipped_avg_gradient = list(zip(
-            self.clipped_avg_gradients,
-            [var for _, var in self.avg_gradient]
-        ))
+            self.avg_gradient = average_gradients(self.tower_gradients)
+            self.clipped_avg_gradients, self.grad_norm = \
+                tf.clip_by_global_norm([grad for grad, _ in self.avg_gradient],
+                                       clip_norm=self.clip_norm)
+
+            self.clipped_avg_gradient = list(zip(
+                self.clipped_avg_gradients,
+                [var for _, var in self.avg_gradient]
+            ))
+
+        with tf.name_scope('stack_grad'):
+            self.LL_grad_stacked = {x: tf.gradients(self.LL_stack, x)
+                                    for x in self.all_mini_vars}
+            self.loss_grad_stacked = {x: tf.gradients(self.loss_stack, x)
+                                      for x in self.all_mini_vars}
+
+            self.avg_gradient_stack = []
+
+            coef = tf.squeeze(self.tf_batch_rewards, axis=-1) + self.loss_stack
+
+            for x, y in zip(self.all_mini_vars, self.all_tf_vars):
+                LL_grad = self.LL_grad_stacked[x][0]
+                loss_grad = self.loss_grad_stacked[x][0]
+
+                dim = len(LL_grad.get_shape())
+                if dim == 1:
+                    self.avg_gradient_stack.append(
+                        (tf.reduce_mean(LL_grad * coef + loss_grad, axis=0), y)
+                    )
+                elif dim == 2:
+                    self.avg_gradient_stack.append(
+                        (
+                            tf.reduce_mean(
+                                LL_grad * tf.tile(tf.reshape(coef, (-1, 1)),
+                                                  [1, tf.shape(LL_grad)[1]]) +
+                                loss_grad,
+                                axis=0
+                            ),
+                            y
+                        )
+                    )
+                elif dim == 3:
+                    self.avg_gradient_stack.append(
+                        (
+                            tf.reduce_mean(
+                                LL_grad * tf.tile(tf.reshape(coef, (-1, 1, 1)),
+                                                  [1, tf.shape(LL_grad)[1], tf.shape(LL_grad)[2]]) +
+                                loss_grad,
+                                axis=0
+                            ),
+                            y
+                        )
+                    )
+
+            self.clipped_avg_gradients_stack, self.grad_norm_stack = \
+                tf.clip_by_global_norm([grad for grad, _ in self.avg_gradient_stack],
+                                       clip_norm=self.clip_norm)
+
+            self.clipped_avg_gradient_stack = list(zip(
+                self.clipped_avg_gradients_stack,
+                [var for _, var in self.avg_gradient_stack]
+            ))
 
         # self.opt = tf.train.GradientDescentOptimizer(learning_rate=self.learning_rate)
         with tf.device(device_cpu):
@@ -527,6 +577,8 @@ class ExpRecurrentTrainer:
                                                global_step=self.global_step)
         self.sgd_clipped_op = self.opt.apply_gradients(self.clipped_avg_gradient,
                                                        global_step=self.global_step)
+        self.sgd_stacked_op = self.opt.apply_gradients(self.clipped_avg_gradient_stack,
+                                                       global_step=self.global_step)
 
         self.sim_opts = sim_opts
         self.src_id = sim_opts.src_id
@@ -539,7 +591,7 @@ class ExpRecurrentTrainer:
                                     max_to_keep=100)
 
         with tf.device(device_cpu):
-            tf.contrib.training.add_gradients_summaries(self.avg_gradient)
+            tf.contrib.training.add_gradients_summaries(self.avg_gradient_stack)
 
             for v in self.all_tf_vars:
                 variable_summaries(v)
@@ -702,7 +754,8 @@ class ExpRecurrentTrainer:
         return true_grads
 
     def train_many(self, num_iters, init_seed=42,
-                   clipping=True, with_summaries=False, with_MP=False):
+                   clipping=True, stack_grad=True,
+                   with_summaries=False, with_MP=False):
         """Run one SGD op given a batch of simulation."""
 
         seed_start = init_seed + self.sess.run(self.global_step) * self.batch_size
@@ -713,7 +766,16 @@ class ExpRecurrentTrainer:
             train_writer = tf.summary.FileWriter(self.summary_dir,
                                                  self.sess.graph)
 
-        train_op = self.sgd_op if not clipping else self.sgd_clipped_op
+        if stack_grad:
+            train_op = self.sgd_stacked_op
+            grad_norm_op = self.grad_norm_stack
+            LL = self.LL_stack
+            loss = self.loss_stack
+        else:
+            train_op = self.sgd_op if not clipping else self.sgd_clipped_op
+            grad_norm_op = self.grad_norm
+            LL = self.LL
+            loss = self.loss
 
         for epoch in range(num_iters):
             batch = []
@@ -737,16 +799,16 @@ class ExpRecurrentTrainer:
 
             if with_summaries:
                 reward, LL, loss, grad_norm, summaries, step, lr, _ = \
-                    self.sess.run([self.tf_batch_rewards, self.LL, self.loss,
-                                   self.grad_norm, self.tf_merged_summaries,
+                    self.sess.run([self.tf_batch_rewards, LL, loss,
+                                   grad_norm_op, self.tf_merged_summaries,
                                    self.global_step, self.tf_learning_rate,
                                    train_op],
                                   feed_dict=f_d)
                 train_writer.add_summary(summaries, step)
             else:
                 reward, LL, loss, grad_norm, step, lr, _ = \
-                    self.sess.run([self.tf_batch_rewards, self.LL, self.loss,
-                                   self.grad_norm, self.global_step,
+                    self.sess.run([self.tf_batch_rewards, LL, loss,
+                                   grad_norm_op, self.global_step,
                                    self.tf_learning_rate, train_op],
                                   feed_dict=f_d)
 
