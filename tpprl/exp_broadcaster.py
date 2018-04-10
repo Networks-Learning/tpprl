@@ -474,10 +474,8 @@ class ExpRecurrentTrainer:
         self.all_mini_vars = [self.Wh_mini, self.Wm_mini, self.Wt_mini, self.Bh_mini,
                               self.Wr_mini, self.bt_mini, self.vt_mini, self.wt_mini]
 
-        with tf.name_scope('split_gard'):
-
+        with tf.name_scope('split_grad'):
             # The gradients are added over the batch if made into a single call.
-            # TODO: Perhaps there is a faster way of calculating these gradients?
             self.LL_grads = {x: [tf.gradients(y, x)
                                  for y in tf.split(self.LL, self.batch_size)]
                              for x in self.all_tf_vars}
@@ -488,8 +486,6 @@ class ExpRecurrentTrainer:
             # Attempt to calculate the gradient within TensorFlow for the entire
             # batch, without moving to the CPU.
             self.tower_gradients = [
-                # TODO: This looks horribly inefficient and should be replaced
-                # by matrix multiplication soon.
                 [(((tf.gather(self.tf_batch_rewards, idx) + tf.gather(self.loss, idx)) * self.LL_grads[x][idx][0] +
                    self.loss_grads[x][idx][0]),
                   x) for x in self.all_tf_vars]
@@ -769,13 +765,13 @@ class ExpRecurrentTrainer:
         if stack_grad:
             train_op = self.sgd_stacked_op
             grad_norm_op = self.grad_norm_stack
-            LL = self.LL_stack
-            loss = self.loss_stack
+            LL_op = self.LL_stack
+            loss_op = self.loss_stack
         else:
             train_op = self.sgd_op if not clipping else self.sgd_clipped_op
             grad_norm_op = self.grad_norm
-            LL = self.LL
-            loss = self.loss
+            LL_op = self.LL
+            loss_op = self.loss
 
         for epoch in range(num_iters):
             batch = []
@@ -799,7 +795,7 @@ class ExpRecurrentTrainer:
 
             if with_summaries:
                 reward, LL, loss, grad_norm, summaries, step, lr, _ = \
-                    self.sess.run([self.tf_batch_rewards, LL, loss,
+                    self.sess.run([self.tf_batch_rewards, LL_op, loss_op,
                                    grad_norm_op, self.tf_merged_summaries,
                                    self.global_step, self.tf_learning_rate,
                                    train_op],
@@ -807,7 +803,7 @@ class ExpRecurrentTrainer:
                 train_writer.add_summary(summaries, step)
             else:
                 reward, LL, loss, grad_norm, step, lr, _ = \
-                    self.sess.run([self.tf_batch_rewards, LL, loss,
+                    self.sess.run([self.tf_batch_rewards, LL_op, loss_op,
                                    grad_norm_op, self.global_step,
                                    self.tf_learning_rate, train_op],
                                   feed_dict=f_d)
