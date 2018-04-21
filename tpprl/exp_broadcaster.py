@@ -130,6 +130,9 @@ def mk_def_exp_recurrent_trainer_opts(num_other_broadcasters, hidden_dims,
 
         # May need a better way of passing reward_fn arguments
         reward_top_k=-1,
+
+        # Whether or not to use the advantage formulation.
+        with_advantage=True,
     )
 
     return def_exp_recurrent_trainer_opts.set(**kwargs)
@@ -141,7 +144,8 @@ class ExpRecurrentTrainer:
                  sess, sim_opts, scope, t_min, batch_size, max_events,
                  learning_rate, clip_norm, with_dynamic_rnn,
                  summary_dir, save_dir, decay_steps, decay_rate, momentum,
-                 reward_top_k, reward_kind, device_cpu, device_gpu, only_cpu):
+                 reward_top_k, reward_kind, device_cpu, device_gpu, only_cpu,
+                 with_advantage):
         """Initialize the trainer with the policy parameters."""
 
         self.reward_top_k = reward_top_k
@@ -483,10 +487,12 @@ class ExpRecurrentTrainer:
                                    for y in tf.split(self.loss, self.batch_size)]
                                for x in self.all_tf_vars}
 
+            avg_reward = tf.reduce_mean(self.tf_batch_rewards, axis=0) if with_advantage else 0.0
+
             # Attempt to calculate the gradient within TensorFlow for the entire
             # batch, without moving to the CPU.
             self.tower_gradients = [
-                [(((tf.gather(self.tf_batch_rewards, idx) + tf.gather(self.loss, idx)) * self.LL_grads[x][idx][0] +
+                [(((tf.gather(self.tf_batch_rewards, idx) + tf.gather(self.loss, idx) - avg_reward) * self.LL_grads[x][idx][0] +
                    self.loss_grads[x][idx][0]),
                   x) for x in self.all_tf_vars]
                 for idx in range(self.batch_size)
@@ -510,7 +516,12 @@ class ExpRecurrentTrainer:
 
             self.avg_gradient_stack = []
 
-            coef = tf.squeeze(self.tf_batch_rewards, axis=-1) + self.loss_stack
+            # TODO: Can we calculate natural gradients here easily?
+            # This is one of the baseline rewards we can calculate.
+            avg_reward = tf.reduce_mean(self.tf_batch_rewards, axis=0) if with_advantage else 0.0
+
+            # Removing the average reward converts this coefficient into the advantage function.
+            coef = tf.squeeze(self.tf_batch_rewards, axis=-1) + self.loss_stack - avg_reward
 
             for x, y in zip(self.all_mini_vars, self.all_tf_vars):
                 LL_grad = self.LL_grad_stacked[x][0]
