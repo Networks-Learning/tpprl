@@ -57,7 +57,7 @@ class TPPRSigmoidCell(tf.contrib.rnn.RNNCell):
             name='h_next'
         )
 
-        c = tf.matmul(h_prev, self.tf_vt) + self.tf_wt * t_delta + self.tf_bt
+        c = tf.matmul(h_prev, self.tf_vt) + self.tf_bt
 
         u_theta = self.u_theta(t_delta, c, name='u_theta')
         # print('u_theta = ', u_theta)

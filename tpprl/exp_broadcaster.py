@@ -25,7 +25,7 @@ def reward_fn(df, reward_kind, reward_opts, sim_opts):
         return -RU.time_in_top_k(df, sim_opts=sim_opts, **reward_opts)
     else:
         raise NotImplementedError('{} reward function is not implemented.'
-                                  .foramt(reward_kind))
+                                  .format(reward_kind))
 
 
 def _worker_sim(params):
@@ -33,7 +33,11 @@ def _worker_sim(params):
     rl_b_args, seed = params
     rl_b_opts = Deco.Options(**rl_b_args)
 
-    exp_b = exp_sampler.ExpRecurrentBroadcasterMP(_opts=rl_b_opts, seed=seed * 3)
+    # Need to select the sampler somehow.
+    exp_b = exp_sampler.ExpRecurrentBroadcasterMP(
+        _opts=rl_b_opts,
+        seed=seed * 3
+    )
     run_sim_opts = rl_b_opts.sim_opts.update({})
 
     mgr = run_sim_opts.create_manager_with_broadcaster(exp_b)
@@ -269,7 +273,7 @@ class ExpRecurrentTrainer:
 
                 assert with_dynamic_rnn, "The non-dynamic-RNN path has been removed."
 
-                # Stacked version (for performance)
+                # Un-stacked version (for ease of debugging)
 
                 with tf.name_scope('batched'):
                     self.rnn_cell = TPPRExpCell(
@@ -352,8 +356,12 @@ class ExpRecurrentTrainer:
                         initial_state=self.tf_batch_init_h
                     )
 
-                    # Unfortunately, this version is way too slow,
-                    # both in the forward and the backward pass.
+                    # In this version, the stacking had been done by creating
+                    # batch_size RNNCells. However, because the multiplication
+                    # inside the cells now has to be done element by element,
+                    # this version is way too slow, both in the forward and the
+                    # backward pass.
+                    #
                     # (tf_batch_b_idxes_mini, tf_batch_t_deltas_mini,
                     #  tf_batch_ranks_mini, tf_batch_seq_len_mini,
                     #  tf_batch_last_interval_mini, tf_batch_init_h_mini) = [
@@ -774,6 +782,7 @@ class ExpRecurrentTrainer:
                                                  self.sess.graph)
 
         if stack_grad:
+            assert clipping, "stacked gradients are always clipped."
             train_op = self.sgd_stacked_op
             grad_norm_op = self.grad_norm_stack
             LL_op = self.LL_stack
@@ -943,7 +952,12 @@ class ExpRecurrentTrainer:
         for idx in range(batch_size):
             # TODO: Split based on the kind of intensity function.
 
-            # The seed doesn't make a difference.
+            # The seed doesn't make a difference because we will not
+            # take samples from this sampler, we will only ask it to
+            # calculate the square loss and the LL.
+            #
+            # TODO: This sampler needs to change from ExpCDFSampler to
+            # SigmoidCDFSampler.
             sampler = exp_sampler.ExpCDFSampler(vt=vt, wt=wt, bt=bt,
                                                 init_h=init_h, t_min=self.t_min,
                                                 seed=42)

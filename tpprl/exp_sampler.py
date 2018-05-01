@@ -184,10 +184,6 @@ class ExpRecurrentBroadcasterMP(OM.Broadcaster):
     TODO: The problem is that calculation of the gradient and the loss/LL
     becomes too complicated with numerical stability issues very quickly. Need
     to implement adaptive scaling to handle that issue.
-
-    Also, this embeds the event history implicitly and the state function does
-    not explicitly model the loss function J(.) faithfully. This is an issue
-    with the theory.
     """
 
     @Deco.optioned()
@@ -221,7 +217,6 @@ class ExpRecurrentBroadcasterMP(OM.Broadcaster):
 
     def update_hidden_state(self, src_id, time_delta):
         """Returns the hidden state after a post by src_id and time delta."""
-        # Best done using self.sess.run here.
         r_t = self.state.get_wall_rank(self.src_id, self.sink_ids, dict_form=False)
         return np.tanh(
             self.Wm[self.src_embed_map[src_id], :][:, np.newaxis] +
