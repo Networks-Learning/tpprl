@@ -61,7 +61,7 @@ def run_sims_MP(trainer, seeds, processes=None):
         't_min': trainer.t_min,
 
         'sim_opts': trainer.sim_opts,
-        'max_events': trainer.max_events,
+        'max_events': trainer.abs_max_events,
         'src_embed_map': trainer.src_embed_map,
 
         'Wm': trainer.sess.run(trainer.tf_Wm),
@@ -175,7 +175,9 @@ class ExpRecurrentTrainer:
         self.batch_size = batch_size
 
         self.tf_batch_size = None
-        self.max_events = max_events
+        self.tf_max_events = None
+
+        self.abs_max_events = max_events
         self.num_hidden_states = num_hidden_states
 
         # init_h = np.reshape(init_h, (-1, 1))
@@ -240,13 +242,13 @@ class ExpRecurrentTrainer:
                                                        shape=(self.tf_batch_size, 1),
                                                        dtype=self.tf_dtype)
                 self.tf_batch_t_deltas = tf.placeholder(name='t_deltas',
-                                                        shape=(self.tf_batch_size, max_events),
+                                                        shape=(self.tf_batch_size, self.tf_max_events),
                                                         dtype=self.tf_dtype)
                 self.tf_batch_b_idxes = tf.placeholder(name='b_idxes',
-                                                       shape=(self.tf_batch_size, max_events),
+                                                       shape=(self.tf_batch_size, self.tf_max_events),
                                                        dtype=tf.int32)
                 self.tf_batch_ranks = tf.placeholder(name='ranks',
-                                                     shape=(self.tf_batch_size, max_events),
+                                                     shape=(self.tf_batch_size, self.tf_max_events),
                                                      dtype=self.tf_dtype)
                 self.tf_batch_seq_len = tf.placeholder(name='seq_len',
                                                        shape=(self.tf_batch_size, 1),
@@ -439,7 +441,7 @@ class ExpRecurrentTrainer:
 
                 self.calc_u_h_states = tf.placeholder(
                     name='calc_u_h_states',
-                    shape=(self.tf_batch_size, self.max_events, self.num_hidden_states),
+                    shape=(self.tf_batch_size, self.tf_max_events, self.num_hidden_states),
                     dtype=self.tf_dtype
                 )
                 self.calc_u_batch_size = tf.placeholder(
@@ -449,35 +451,19 @@ class ExpRecurrentTrainer:
                 )
 
                 self.calc_u_c_is_init = tf.matmul(self.tf_batch_init_h, self.tf_vt) + self.tf_bt
-                self.calc_u_c_is_rest = tf.split(
-                    tf.squeeze(
-                        tf.matmul(
-                            self.calc_u_h_states,
-                            tf.tile(
-                                tf.expand_dims(self.tf_vt, 0),
-                                [self.calc_u_batch_size[0], 1, 1]
-                            )
-                        ) + self.tf_bt,
-                        axis=-1
-                    ),
-                    self.max_events,
-                    axis=1,
+                self.calc_u_c_is_rest = tf.squeeze(
+                    tf.matmul(
+                        self.calc_u_h_states,
+                        tf.tile(
+                            tf.expand_dims(self.tf_vt, 0),
+                            [self.calc_u_batch_size[0], 1, 1]
+                        )
+                    ) + self.tf_bt,
+                    axis=-1,
                     name='calc_u_c_is_rest'
                 )
 
-                self.calc_u_t_deltas = tf.split(
-                    self.tf_batch_t_deltas,
-                    self.max_events,
-                    axis=1,
-                    name='calc_u_t_deltas'
-                )
-
-                self.calc_u_is_own_event = tf.split(
-                    tf.equal(self.tf_batch_b_idxes, 0),
-                    self.max_events,
-                    axis=1,
-                    name='calc_u_is_own_event'
-                )
+                self.calc_u_is_own_event = tf.equal(self.tf_batch_b_idxes, 0)
 
         # TODO: The all_tf_vars and all_mini_vars MUST be kept in sync.
         self.all_tf_vars = [self.tf_Wh, self.tf_Wm, self.tf_Wt, self.tf_Bh,
@@ -656,7 +642,7 @@ class ExpRecurrentTrainer:
         # too large to fit in our buffer.
         # Otherwise, we always assume that the sequence didn't produce another
         # event till the end of the time (causing overflows in the survival terms).
-        mgr.run_dynamic(max_events=self.max_events + 1)
+        mgr.run_dynamic(max_events=self.abs_max_events + 1)
         return mgr.get_state().get_dataframe()
 
     def get_feed_dict(self, batch_df, is_test=False, pre_comp_batch_rewards=None):
@@ -672,7 +658,12 @@ class ExpRecurrentTrainer:
 
         batch_size = len(batch_df)
 
-        full_shape = (batch_size, self.max_events)
+        if self.tf_max_events is None:
+            max_events = max(df.event_id.nunique() for df in batch_df)
+        else:
+            max_events = self.abs_max_events
+
+        full_shape = (batch_size, max_events)
 
         if pre_comp_batch_rewards is not None:
             batch_rewards = np.reshape(pre_comp_batch_rewards, (-1, 1))
@@ -694,8 +685,7 @@ class ExpRecurrentTrainer:
         batch_init_h = np.zeros(shape=(batch_size, self.num_hidden_states), dtype=float)
         batch_last_interval = np.zeros(shape=batch_size, dtype=float)
 
-        # This is one of the reasons why this can handle only one sink right now.
-        batch_seq_len = np.asarray([np.minimum(x.shape[0], self.max_events)
+        batch_seq_len = np.asarray([np.minimum(x.event_id.nunique(), max_events)
                                     for x in batch_df], dtype=int)[:, np.newaxis]
 
         for idx, df in enumerate(batch_df):
@@ -705,7 +695,8 @@ class ExpRecurrentTrainer:
             batch_ranks[idx, 0:batch_len] = rank_in_tau.values[0:batch_len]
             batch_b_idxes[idx, 0:batch_len] = df.src_id.map(self.src_embed_map).values[0:batch_len]
             batch_t_deltas[idx, 0:batch_len] = df.time_delta.values[0:batch_len]
-            if batch_len == df.shape[0]:
+
+            if batch_len == df.event_id.nunique():
                 # This batch has consumed all the events
                 batch_last_interval[idx] = self.sim_opts.end_time - df.t.iloc[-1]
             else:
@@ -867,9 +858,8 @@ class ExpRecurrentTrainer:
 
     def calc_u(self, h_states, feed_dict, batch_size, times):
         """Calculate u(t) at the times provided."""
-        # TODO: May not work if max_events is hit.
+        # TODO: May not work if abs_max_events is hit.
 
-        # This immediately assumes that the
         feed_dict[self.calc_u_h_states] = h_states
         feed_dict[self.calc_u_batch_size] = [batch_size]
 
@@ -878,9 +868,10 @@ class ExpRecurrentTrainer:
             axis=-1
         ) + 1  # +1 to include the survival term.
 
-        assert np.all(tf_seq_len < self.max_events), "Cannot handle events > max_events right now."
+        assert self.tf_max_events is None or np.all(tf_seq_len < self.abs_max_events), "Cannot handle events > max_events right now."
         # This will involve changing how the survival term is added, is_own_event is added, etc.
 
+        tf_c_is_arr = self.sess.run(self.calc_u_c_is_rest, feed_dict=feed_dict)
         tf_c_is = (
             [
                 self.sess.run(
@@ -888,18 +879,13 @@ class ExpRecurrentTrainer:
                     feed_dict=feed_dict
                 )
             ] +
-            self.sess.run(
-                self.calc_u_c_is_rest,
-                feed_dict=feed_dict
-            )
+            np.split(tf_c_is_arr, tf_c_is_arr.shape[1], axis=1)
         )
         tf_c_is = list(zip(*tf_c_is))
 
+        tf_t_deltas_arr = self.sess.run(self.tf_batch_t_deltas, feed_dict=feed_dict)
         tf_t_deltas = (
-            self.sess.run(
-                self.calc_u_t_deltas,
-                feed_dict=feed_dict
-            ) +
+            np.split(tf_t_deltas_arr, tf_t_deltas_arr.shape[1], axis=1) +
             # Cannot add last_interval at the end of the array because
             # the sequence may have ended before that.
             # Instead, we add tf_t_deltas of 0 to make the length of this
@@ -908,11 +894,9 @@ class ExpRecurrentTrainer:
         )
         tf_t_deltas = list(zip(*tf_t_deltas))
 
+        tf_is_own_event_arr = self.sess.run(self.calc_u_is_own_event, feed_dict=feed_dict)
         tf_is_own_event = (
-            self.sess.run(
-                self.calc_u_is_own_event,
-                feed_dict=feed_dict
-            ) +
+            np.split(tf_is_own_event_arr, tf_is_own_event_arr.shape[1], axis=1) +
             [np.asarray([False] * batch_size)]
         )
 
@@ -927,7 +911,7 @@ class ExpRecurrentTrainer:
         )
 
         for idx in range(batch_size):
-            assert tf_is_own_event[idx][tf_seq_len[idx] - 1]
+            # assert tf_is_own_event[idx][tf_seq_len[idx] - 1]
             tf_is_own_event[idx][tf_seq_len[idx] - 1] = False
 
             assert tf_t_deltas[idx][tf_seq_len[idx] - 1] == 0
