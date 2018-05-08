@@ -26,6 +26,7 @@ class CDFSampler:
         self.Q = 1.0
 
         self.random_state = np.random.RandomState(seed)
+        self.t0 = t_min
         self.reset(t_min, init_h, reset_sample=True)
 
     def cdf(self, t):
@@ -238,7 +239,7 @@ class ExpRecurrentBroadcasterMP(OM.Broadcaster):
             # This is the first event. Post immediately to join the party?
             # Or hold off?
             # Currently, it is waiting.
-            return self.exp_sampler.generate_sample()
+            return self.exp_sampler.generate_sample() - self.last_self_event_time
         else:
             self.cur_h = self.update_hidden_state(event.src_id, event.time_delta)
             next_post_time = self.exp_sampler.register_event(
@@ -319,7 +320,7 @@ class ExpRecurrentBroadcaster(OM.Broadcaster):
             # This is the first event. Post immediately to join the party?
             # Or hold off?
             # Currently, it is waiting.
-            return self.exp_sampler.generate_sample()
+            return self.exp_sampler.generate_sample() - self.last_self_event_time
         else:
             self.cur_h = self.update_hidden_state(event.src_id, event.time_delta)
             next_post_time = self.exp_sampler.register_event(
