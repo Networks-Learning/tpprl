@@ -5,7 +5,7 @@ import tensorflow as tf
 import decorated_options as Deco
 import exp_sampler
 import multiprocessing as MP
-import warnings
+import read_data_utils as RDU
 
 from utils import variable_summaries, _now, average_gradients, get_test_dfs
 
@@ -1080,3 +1080,217 @@ class ExpRecurrentTrainer:
             'times': times,
             'u': u,
         }
+
+
+def get_real_data_eval(trainer, sample_data):
+    test_dfs, window_start, window_end, batch_sim_opts = make_real_data_batch_df(
+        trainer,
+        N=200,
+        seed=190,
+        one_user_data=sample_data,
+        is_test=True
+    )
+    batch_time_start = [df.t.min() for df in test_dfs]
+    batch_time_end = [df.t.max() for df in test_dfs]
+    test_f_d = trainer.get_feed_dict(test_dfs, batch_end_times=batch_time_end)
+    h_states = trainer.sess.run(trainer.h_states_stack, feed_dict=test_f_d)
+    times = np.arange(window_start, window_end, (window_end - window_start) / 5000)
+    u_data = trainer.calc_u(
+        h_states=h_states,
+        feed_dict=test_f_d,
+        batch_size=len(test_dfs),
+        times=times,
+        batch_time_start=batch_time_start
+    )
+    rewards = [reward_fn(df=df,
+                         reward_kind=trainer.reward_kind,
+                         reward_opts=make_reward_opts(trainer),
+                         sim_opts=sim_opts)
+               for df, sim_opts in zip(test_dfs, batch_sim_opts)]
+    u_data['rewards'] = rewards
+    return u_data
+
+
+def train_real_data(trainer, N, one_user_data, num_iters, init_seed, with_summaries=False):
+    """Train using real-data."""
+
+    seed_start = init_seed + trainer.sess.run(trainer.global_step) * trainer.batch_size
+
+    if with_summaries:
+        assert trainer.summary_dir is not None
+        os.makedirs(trainer.summary_dir, exist_ok=True)
+        train_writer = tf.summary.FileWriter(trainer.summary_dir,
+                                             trainer.sess.graph)
+    train_op = trainer.sgd_stacked_op
+    grad_norm_op = trainer.grad_norm_stack
+    LL_op = trainer.LL_stack
+    loss_op = trainer.loss_stack
+
+    for epoch in range(num_iters):
+            batch = []
+            seed_end = seed_start + trainer.batch_size
+
+            # seeds = range(seed_start, seed_end)
+
+            batch, batch_sim_opts = make_real_data_batch_df(
+                trainer,
+                N=N,
+                seed=seed_start,
+                one_user_data=one_user_data,
+                is_test=False
+            )
+            batch_end_times = [x.end_time for x in batch_sim_opts]
+            pre_comp_batch_rewards = None
+
+            # Have not implemented with_MP because it didn't seem to offer any advantage.
+            # batch, pre_comp_batch_rewards = zip(*run_sims_MP(trainer=self, seeds=seeds))
+
+            num_events = [df.event_id.nunique() for df in batch]
+            num_our_events = [RU.num_tweets_of(df, sim_opts=trainer.sim_opts)
+                              for df in batch]
+
+            f_d = trainer.get_feed_dict(
+                batch,
+                pre_comp_batch_rewards=pre_comp_batch_rewards,
+                batch_end_times=batch_end_times
+            )
+
+            if with_summaries:
+                reward, LL, loss, grad_norm, summaries, step, lr, _ = \
+                    trainer.sess.run([trainer.tf_batch_rewards, LL_op, loss_op,
+                                      grad_norm_op, trainer.tf_merged_summaries,
+                                      trainer.global_step, trainer.tf_learning_rate,
+                                      train_op],
+                                     feed_dict=f_d)
+                train_writer.add_summary(summaries, step)
+            else:
+                reward, LL, loss, grad_norm, step, lr, _ = \
+                    trainer.sess.run([trainer.tf_batch_rewards, LL_op, loss_op,
+                                      grad_norm_op, trainer.global_step,
+                                      trainer.tf_learning_rate, train_op],
+                                     feed_dict=f_d)
+            mean_LL = np.mean(LL)
+            mean_loss = np.mean(loss)
+            mean_reward = np.mean(reward)
+
+            print('{} Run {}, LL {:.5f}, loss {:.5f}, Rwd {:.5f}'
+                  ', CTG {:.5f}, seeds {}--{}, grad_norm {:.5f}, step = {}'
+                  ', lr = {:.5f}, events = {:.2f}/{:.2f}'
+                  .format(_now(), epoch, mean_LL, mean_loss,
+                          mean_reward, mean_reward + mean_loss,
+                          seed_start, seed_end - 1, grad_norm, step, lr,
+                          np.mean(num_our_events), np.mean(num_events)))
+
+            chkpt_file = os.path.join(trainer.save_dir, 'tpprl.ckpt')
+            trainer.saver.save(trainer.sess, chkpt_file, global_step=trainer.global_step,)
+
+            # Ready for the next epoch.
+            seed_start = seed_end
+
+
+def make_real_data_batch_df(trainer, N, seed, one_user_data, is_test):
+    """Create a batch for training the NN for the given user."""
+
+    batch_size = trainer.batch_size
+    batch_df = []
+    sim_opts = []
+
+    for idx in range(batch_size):
+        sim_opt_seed = seed + idx * 9
+        mgr_seed = seed * 91 + idx
+        window_start, batch_sim_opt = make_real_data_batch_sim_opts(
+            one_user_data,
+            N=N,
+            is_test=is_test,
+            seed=sim_opt_seed
+        )
+        sim_opts.append(batch_sim_opt)
+        df = run_real_data_sim(trainer, t_min=window_start, batch_sim_opt=batch_sim_opt, seed=mgr_seed)
+        batch_df.append(df)
+        # print(idx, sim_opt_seed, mgr_seed, window_start)
+
+    if is_test:
+        return batch_df, window_start, batch_sim_opt.end_time, sim_opts
+    else:
+        return batch_df, sim_opts
+
+
+def run_real_data_sim(trainer, t_min, batch_sim_opt, seed):
+    """Runs a simulation and returns a batch_sim_opt. Runs the simulations sequentially."""
+    exp_b = trainer._create_exp_broadcaster(seed=seed, t_min=t_min)
+    mgr = batch_sim_opt.create_manager_with_broadcaster(exp_b)
+    mgr.state.time = t_min
+    mgr.run_dynamic()
+    return mgr.get_state().get_dataframe()
+
+
+def make_real_data_batch_sim_opts(one_user_data, N, is_test, seed):
+    """Create a batch from the given one_user_data which has roughly N posts from others.
+    The last window is returned if is_test is true. Otherwise, a random window from
+    inside the duration is returned."""
+    start_time, end_time = one_user_data['user_event_times'][0], one_user_data['user_event_times'][-1]
+    duration = end_time - start_time
+    num_other_posts = one_user_data['num_other_posts']
+
+    window_len = (duration / num_other_posts) * N
+
+    # Have to pick a random window of this length if is_test=False
+    if is_test:
+        window_end = end_time
+        # Sometimes, the window selected has no events at all.
+        # In that case, move the window once step to the left.
+        while True:
+            window_start = window_end - window_len
+            new_sim_opts = RDU.prune_sim_opts(
+                one_user_data['sim_opts'],
+                followee_ids=one_user_data['followees'],
+                start_time=window_start,
+                end_time=window_end
+            )
+            if sum(len(d['times']) for _, d in new_sim_opts.other_sources) > 0:
+                break
+            else:
+                window_end -= window_len
+    else:
+        # Sometimes, the window selected has no events at all.
+        # In that case, select a different window.
+        RS = np.random.RandomState(seed=seed)
+        while True:
+            window_start = RS.rand() * (duration - 2 * window_len)
+            window_end = window_start + window_len
+
+            new_sim_opts = RDU.prune_sim_opts(
+                one_user_data['sim_opts'],
+                followee_ids=one_user_data['followees'],
+                start_time=window_start,
+                end_time=window_end
+            )
+            if sum(len(d['times']) for _, d in new_sim_opts.other_sources) > 0:
+                break
+
+    return window_start, new_sim_opts
+
+
+def make_NN_for(sim_opts, run_num):
+    hidden_dims = 8
+    batch_size = 16
+
+    num_other_broadcasters = len(sim_opts.other_sources)
+    num_followers = len(sim_opts.sink_ids)
+
+    only_cpu = False
+    max_events = 20000
+    decay_steps = 10   # Instead of 100.
+    reward_kind = R_2_REWARD
+    with_advantage = True
+
+    sess = tf.Session()
+    trainer_opts = mk_def_exp_recurrent_trainer_opts(seed=42, hidden_dims=hidden_dims, num_other_broadcasters=num_other_broadcasters,
+                                                     only_cpu=only_cpu, max_events=max_events, reward_top_k=1, reward_kind=reward_kind,
+                                                     batch_size=batch_size, decay_steps=decay_steps, num_followers=num_followers,
+                                                     with_advantage=with_advantage,
+                                                     summary_dir='./tpprl.summary-real-data/train-{}/'.format(run_num),
+                                                     save_dir='./tpprl.save-real-data/'.format(sim_opts.q))
+
+    trainer = ExpRecurrentTrainer(sim_opts=sim_opts, _opts=trainer_opts, sess=sess)
+    return trainer
