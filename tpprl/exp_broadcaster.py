@@ -701,7 +701,8 @@ class ExpRecurrentTrainer:
         mgr.run_dynamic(max_events=self.abs_max_events + 1)
         return mgr.get_state().get_dataframe()
 
-    def get_feed_dict(self, batch_df, is_test=False, pre_comp_batch_rewards=None):
+    def get_feed_dict(self, batch_df, is_test=False,
+                      pre_comp_batch_rewards=None, batch_end_times=None):
         """Produce a feed_dict for the given batch."""
 
         # assert all(df.sink_id.nunique() == 1 for df in batch_df), "Can only handle one sink at the moment."
@@ -770,7 +771,10 @@ class ExpRecurrentTrainer:
 
             if batch_len == df.event_id.nunique():
                 # This batch has consumed all the events
-                batch_last_interval[idx] = self.sim_opts.end_time - df.t.iloc[-1]
+                if batch_end_times is None:
+                    batch_last_interval[idx] = self.sim_opts.end_time - df.t.iloc[-1]
+                else:
+                    batch_last_interval[idx] = batch_end_times[idx] - df.t.iloc[-1]
             else:
                 batch_last_interval[idx] = df.time_delta[batch_len]
 
@@ -1044,7 +1048,7 @@ class ExpRecurrentTrainer:
         u = np.zeros((batch_size, times.shape[0]), dtype=float)
 
         for batch_idx in range(batch_size):
-            abs_time = 0
+            abs_time = batch_time_start[idx]
             abs_idx = 0
             c = tf_c_is[batch_idx][0]
 
