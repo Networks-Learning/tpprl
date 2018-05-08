@@ -5,8 +5,9 @@ import tensorflow as tf
 import decorated_options as Deco
 import exp_sampler
 import multiprocessing as MP
+import warnings
 
-from utils import variable_summaries, _now, average_gradients
+from utils import variable_summaries, _now, average_gradients, get_test_dfs
 
 from cells import TPPRExpCell, TPPRExpCellStacked
 
@@ -88,7 +89,7 @@ def run_sims_MP(trainer, seeds, processes=None):
 
 
 def mk_def_exp_recurrent_trainer_opts(num_other_broadcasters, hidden_dims,
-                                      seed=42, **kwargs):
+                                      seed=42, num_followers=1, **kwargs):
     """Make default option set."""
     RS  = np.random.RandomState(seed=seed)
 
@@ -102,11 +103,11 @@ def mk_def_exp_recurrent_trainer_opts(num_other_broadcasters, hidden_dims,
         learning_rate=.01,
         clip_norm=1.0,
 
-        momentum=0.9,
+        num_followers=num_followers,
 
         Wh=RS.randn(hidden_dims, hidden_dims) * 0.1 + np.diag(np.ones(hidden_dims)),  # Careful initialization
         Wm=RS.randn(num_other_broadcasters + 1, hidden_dims),
-        Wr=RS.randn(hidden_dims, 1),
+        Wr=RS.randn(hidden_dims, num_followers),
         Wt=RS.randn(hidden_dims, 1),
         Bh=RS.randn(hidden_dims, 1),
 
@@ -118,6 +119,7 @@ def mk_def_exp_recurrent_trainer_opts(num_other_broadcasters, hidden_dims,
         # trajectory may contain much fewer events. So it is wise to set
         # it such that it is just above the total number of events likely
         # to be seen.
+        momentum=0.9,
         max_events=5000,
         batch_size=16,
 
@@ -148,8 +150,10 @@ class ExpRecurrentTrainer:
                  sess, sim_opts, scope, t_min, batch_size, max_events,
                  learning_rate, clip_norm, with_dynamic_rnn,
                  summary_dir, save_dir, decay_steps, decay_rate, momentum,
-                 reward_top_k, reward_kind, device_cpu, device_gpu, only_cpu,
-                 with_advantage):
+                 device_cpu, device_gpu, only_cpu, with_advantage,
+                 num_followers, decay_q_rate,
+                 reward_top_k, reward_kind,
+                 reward_episode_target, reward_target_weight):
         """Initialize the trainer with the policy parameters."""
 
         self.reward_top_k = reward_top_k
@@ -176,6 +180,7 @@ class ExpRecurrentTrainer:
 
         self.tf_batch_size = None
         self.tf_max_events = None
+        self.num_followers = num_followers
 
         self.abs_max_events = max_events
         self.num_hidden_states = num_hidden_states
@@ -206,14 +211,14 @@ class ExpRecurrentTrainer:
 
                 self.tf_b_idx = tf.placeholder(name='b_idx', shape=1, dtype=tf.int32)
                 self.tf_t_delta = tf.placeholder(name='t_delta', shape=1, dtype=self.tf_dtype)
-                self.tf_rank = tf.placeholder(name='rank', shape=1, dtype=self.tf_dtype)
+                self.tf_rank = tf.placeholder(name='rank', shape=(num_followers, 1), dtype=self.tf_dtype)
 
                 self.tf_h_next = tf.nn.tanh(
                     tf.transpose(
                         tf.nn.embedding_lookup(self.tf_Wm, self.tf_b_idx, name='b_embed')
                     ) +
                     tf.matmul(self.tf_Wh, self.tf_h) +
-                    self.tf_Wr * self.tf_rank +
+                    tf.matmul(self.tf_Wr, self.tf_rank) +
                     self.tf_Wt * self.tf_t_delta +
                     self.tf_Bh,
                     name='h_next'
@@ -248,7 +253,7 @@ class ExpRecurrentTrainer:
                                                        shape=(self.tf_batch_size, self.tf_max_events),
                                                        dtype=tf.int32)
                 self.tf_batch_ranks = tf.placeholder(name='ranks',
-                                                     shape=(self.tf_batch_size, self.tf_max_events),
+                                                     shape=(self.tf_batch_size, self.tf_max_events, self.num_followers),
                                                      dtype=self.tf_dtype)
                 self.tf_batch_seq_len = tf.placeholder(name='seq_len',
                                                        shape=(self.tf_batch_size, 1),
@@ -291,7 +296,7 @@ class ExpRecurrentTrainer:
                     ((self.h_states, LL_log_terms, LL_int_terms, loss_terms), tf_batch_h_t) = tf.nn.dynamic_rnn(
                         self.rnn_cell,
                         inputs=(tf.expand_dims(self.tf_batch_b_idxes, axis=-1),
-                                tf.expand_dims(self.tf_batch_ranks, axis=-1),
+                                self.tf_batch_ranks,
                                 tf.expand_dims(self.tf_batch_t_deltas, axis=-1)),
                         sequence_length=tf.squeeze(self.tf_batch_seq_len, axis=-1),
                         dtype=self.tf_dtype,
@@ -351,7 +356,7 @@ class ExpRecurrentTrainer:
                     ((self.h_states_stack, LL_log_terms_stack, LL_int_terms_stack, loss_terms_stack), tf_batch_h_t_mini) = tf.nn.dynamic_rnn(
                         self.rnn_cell_stack,
                         inputs=(tf.expand_dims(self.tf_batch_b_idxes, axis=-1),
-                                tf.expand_dims(self.tf_batch_ranks, axis=-1),
+                                self.tf_batch_ranks,
                                 tf.expand_dims(self.tf_batch_t_deltas, axis=-1)),
                         sequence_length=tf.squeeze(self.tf_batch_seq_len, axis=-1),
                         dtype=self.tf_dtype,
@@ -681,7 +686,7 @@ class ExpRecurrentTrainer:
         batch_t_deltas = np.zeros(shape=full_shape, dtype=float)
 
         batch_b_idxes = np.zeros(shape=full_shape, dtype=int)
-        batch_ranks = np.zeros(shape=full_shape, dtype=float)
+        batch_ranks = np.zeros(shape=full_shape + (num_followers,), dtype=float)
         batch_init_h = np.zeros(shape=(batch_size, self.num_hidden_states), dtype=float)
         batch_last_interval = np.zeros(shape=batch_size, dtype=float)
 
@@ -691,10 +696,21 @@ class ExpRecurrentTrainer:
         for idx, df in enumerate(batch_df):
             # They are sorted by time already.
             batch_len = int(batch_seq_len[idx])
-            rank_in_tau = RU.rank_of_src_in_df(df=df, src_id=self.src_id).mean(axis=1)
-            batch_ranks[idx, 0:batch_len] = rank_in_tau.values[0:batch_len]
-            batch_b_idxes[idx, 0:batch_len] = df.src_id.map(self.src_embed_map).values[0:batch_len]
-            batch_t_deltas[idx, 0:batch_len] = df.time_delta.values[0:batch_len]
+
+            # If the rank of our broadcaster is 'nan', then make it zero.
+            rank_in_tau = RU.rank_of_src_in_df(df=df, src_id=self.src_id).fillna(0.0)
+
+            # If there is a follower who has not seen a single event in the df,
+            # Then
+            for follower_id in all_followers:
+                if follower_id not in rank_in_tau.columns:
+                    rank_in_tau[follower_id] = 0
+
+            batch_ranks[idx, 0:batch_len, :] = rank_in_tau[all_followers].values[0:batch_len, :]
+
+            df_unique = df.groupby('event_id').first()
+            batch_b_idxes[idx, 0:batch_len] = df_unique.src_id.map(self.src_embed_map).values[0:batch_len]
+            batch_t_deltas[idx, 0:batch_len] = df_unique.time_delta.values[0:batch_len]
 
             if batch_len == df.event_id.nunique():
                 # This batch has consumed all the events
@@ -915,6 +931,7 @@ class ExpRecurrentTrainer:
             tf_is_own_event[idx][tf_seq_len[idx] - 1] = False
 
             assert tf_t_deltas[idx][tf_seq_len[idx] - 1] == 0
+            assert tf_t_deltas[idx][tf_seq_len[idx] - 2] > 0
             # tf_t_deltas[idx] is a tuple,
             # we to change it to a list to update a value and then convert
             # back to a tuple.
@@ -974,7 +991,8 @@ class ExpRecurrentTrainer:
             for time_idx, t in enumerate(times):
                 # We do not wish to update the c for the last survival interval.
                 # Hence, the -1 in len(tf_t_deltas[batch_idx] - 1
-                while abs_idx < len(tf_t_deltas[batch_idx]) - 1 and abs_time + tf_t_deltas[batch_idx][abs_idx] < t:
+                # while abs_idx < len(tf_t_deltas[batch_idx]) - 1 and abs_time + tf_t_deltas[batch_idx][abs_idx] < t:
+                while abs_idx < tf_seq_len[batch_idx] - 1 and abs_time + tf_t_deltas[batch_idx][abs_idx] < t:
                     abs_time += tf_t_deltas[batch_idx][abs_idx]
                     abs_idx += 1
                     c = tf_c_is[batch_idx][abs_idx]

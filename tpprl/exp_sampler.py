@@ -217,11 +217,11 @@ class ExpRecurrentBroadcasterMP(OM.Broadcaster):
 
     def update_hidden_state(self, src_id, time_delta):
         """Returns the hidden state after a post by src_id and time delta."""
-        r_t = self.state.get_wall_rank(self.src_id, self.sink_ids, dict_form=False)
+        r_t = np.nan_to_num(self.state.get_wall_rank(self.src_id, self.sink_ids, dict_form=False, assume_first=True).astype(float))
         return np.tanh(
             self.Wm[self.src_embed_map[src_id], :][:, np.newaxis] +
             self.Wh.dot(self.cur_h) +
-            self.Wr * np.asarray([np.mean(r_t)]).reshape(-1) +
+            self.Wr.dot(r_t.reshape(-1, 1)) +  # TODO: untested
             self.Wt * time_delta +
             self.Bh
         )
@@ -294,13 +294,14 @@ class ExpRecurrentBroadcaster(OM.Broadcaster):
     def update_hidden_state(self, src_id, time_delta):
         """Returns the hidden state after a post by src_id and time delta."""
         # Best done using self.sess.run here.
-        r_t = self.state.get_wall_rank(self.src_id, self.sink_ids, dict_form=False)
+        raw_ranks = self.state.get_wall_rank(self.src_id, self.sink_ids, dict_form=False, assume_first=True)
+        r_t = np.nan_to_num(raw_ranks.astype(float))
 
         feed_dict = {
             self.trainer.tf_b_idx: np.asarray([self.trainer.src_embed_map[src_id]]),
             self.trainer.tf_t_delta: np.asarray([time_delta]).reshape(-1),
             self.trainer.tf_h: self.cur_h,
-            self.trainer.tf_rank: np.asarray([np.mean(r_t)]).reshape(-1)
+            self.trainer.tf_rank: r_t.reshape(-1, 1)
         }
         return self.trainer.sess.run(self.trainer.tf_h_next,
                                      feed_dict=feed_dict)
