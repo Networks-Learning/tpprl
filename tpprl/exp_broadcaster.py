@@ -237,6 +237,11 @@ class ExpRecurrentTrainer:
 
         var_device = device_cpu if only_cpu else device_gpu
 
+        # self.opt = tf.train.GradientDescentOptimizer(learning_rate=self.learning_rate)
+        with tf.device(device_cpu):
+            # Global step needs to be on the CPU (Why?)
+            self.global_step = tf.Variable(0, name='global_step', trainable=False)
+
         with tf.variable_scope(self.scope):
             with tf.variable_scope('hidden_state'):
                 with tf.device(var_device):
@@ -365,7 +370,7 @@ class ExpRecurrentTrainer:
                     self.loss_last = self.rnn_cell.last_loss(tf_batch_h_t, self.tf_batch_last_interval)
 
                     self.LL = tf.reduce_sum(self.LL_log_terms, axis=1) - tf.reduce_sum(self.LL_int_terms, axis=1) + self.LL_last
-                    self.loss = (self.q / 2) * (tf.reduce_sum(self.loss_terms, axis=1) + self.loss_last)
+                    self.loss = (self.q / 2) * (tf.reduce_sum(self.loss_terms, axis=1) + self.loss_last) * tf.pow(tf.cast(self.global_step, self.tf_dtype), self.decay_q_rate)
 
                 # Stacked version (for performance)
 
@@ -479,7 +484,8 @@ class ExpRecurrentTrainer:
                     self.loss_last_term_stack = self.rnn_cell_stack.last_loss(tf_batch_h_t_mini, self.tf_batch_last_interval)
 
                     self.LL_stack = (tf.reduce_sum(self.LL_log_terms_stack, axis=1) - tf.reduce_sum(self.LL_int_terms_stack, axis=1)) + self.LL_last_term_stack
-                    self.loss_stack = (self.q / 2) * (tf.reduce_sum(self.loss_terms_stack, axis=1) + self.loss_last_term_stack)
+                    self.loss_stack = (self.q / 2) * (tf.reduce_sum(self.loss_terms_stack, axis=1) + self.loss_last_term_stack) * tf.pow(tf.cast(self.global_step, self.tf_dtype), self.decay_q_rate)
+
 
             with tf.name_scope('calc_u'):
                 # These are operations needed to calculate u(t) in post-processing.
@@ -609,11 +615,6 @@ class ExpRecurrentTrainer:
                 self.clipped_avg_gradients_stack,
                 [var for _, var in self.avg_gradient_stack]
             ))
-
-        # self.opt = tf.train.GradientDescentOptimizer(learning_rate=self.learning_rate)
-        with tf.device(device_cpu):
-            # Global step needs to be on the CPU (Why?)
-            self.global_step = tf.Variable(0, name='global_step', trainable=False)
 
         self.tf_learning_rate = tf.train.inverse_time_decay(
             self.learning_rate,
