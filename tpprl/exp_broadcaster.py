@@ -653,14 +653,14 @@ class ExpRecurrentTrainer:
                 variable_summaries(v)
 
             variable_summaries(self.tf_learning_rate, name='learning_rate')
-            variable_summaries(self.loss, name='loss')
-            variable_summaries(self.LL, name='LL')
-            variable_summaries(self.loss_last, name='loss_last_term')
-            variable_summaries(self.LL_last, name='LL_last_term')
-            variable_summaries(self.h_states, name='hidden_states')
-            variable_summaries(self.LL_log_terms, name='LL_log_terms')
-            variable_summaries(self.LL_int_terms, name='LL_int_terms')
-            variable_summaries(self.loss_terms, name='loss_terms')
+            variable_summaries(self.loss_stack, name='loss_stack')
+            variable_summaries(self.LL_stack, name='LL_stack')
+            variable_summaries(self.loss_last_term_stack, name='loss_last_term_stack')
+            variable_summaries(self.LL_last_term_stack, name='LL_last_term_stack')
+            variable_summaries(self.h_states_stack, name='hidden_states_stack')
+            variable_summaries(self.LL_log_terms_stack, name='LL_log_terms_stack')
+            variable_summaries(self.LL_int_terms_stack, name='LL_int_terms_stack')
+            variable_summaries(self.loss_terms_stack, name='loss_terms_stack')
             variable_summaries(tf.cast(self.tf_batch_seq_len, self.tf_dtype),
                                name='batch_seq_len')
 
