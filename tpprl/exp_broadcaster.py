@@ -537,7 +537,7 @@ class ExpRecurrentTrainer:
                                    for y in tf.split(self.loss, self.batch_size)]
                                for x in self.all_tf_vars}
 
-            avg_reward = tf.reduce_mean(self.tf_batch_rewards, axis=0) if with_advantage else 0.0
+            avg_reward = tf.reduce_mean(self.loss, axis=0) + tf.reduce_mean(self.tf_batch_rewards, axis=0) if with_advantage else 0.0
 
             # Attempt to calculate the gradient within TensorFlow for the entire
             # batch, without moving to the CPU.
@@ -567,8 +567,9 @@ class ExpRecurrentTrainer:
             self.avg_gradient_stack = []
 
             # TODO: Can we calculate natural gradients here easily?
+            # TODO: Should we take into account the loss as well as the reward?
             # This is one of the baseline rewards we can calculate.
-            avg_reward = tf.reduce_mean(self.tf_batch_rewards, axis=0) if with_advantage else 0.0
+            avg_reward = tf.reduce_mean(self.tf_batch_rewards, axis=0) + tf.reduce_mean(self.loss_stack, axis=0) if with_advantage else 0.0
 
             # Removing the average reward converts this coefficient into the advantage function.
             coef = tf.squeeze(self.tf_batch_rewards, axis=-1) + self.loss_stack - avg_reward
