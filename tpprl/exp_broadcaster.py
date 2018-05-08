@@ -45,11 +45,10 @@ def make_reward_opts(trainer):
 def get_test_perf(trainer, seeds, t_min=None, t_max=None):
     """Takes the trainer and performs simulations for the given set of seeds."""
 
-    if t_min is not None or t_max is not None:
-        warnings.warn('t_min and t_max are deprecated.')
-
     seeds = list(seeds)
-    t_min, t_max = trainer.t_min, trainer.t_max
+
+    if t_min is None and t_max is None:
+        t_min, t_max = trainer.t_min, trainer.t_max
 
     dfs = get_test_dfs(trainer, seeds, t_min, t_max)
     f_d = trainer.get_feed_dict(dfs, is_test=True)
@@ -208,8 +207,12 @@ class ExpRecurrentTrainer:
         self.summary_dir = summary_dir
         self.save_dir = save_dir
 
-        self.src_embed_map = {x.src_id: idx + 1
-                              for idx, x in enumerate(sim_opts.create_other_sources())}
+        # self.src_embed_map = {x.src_id: idx + 1
+        #                       for idx, x in enumerate(sim_opts.create_other_sources())}
+
+        # To handle multiple reloads
+        self.src_embed_map = {x[1]['src_id']: idx + 1
+                              for idx, x in enumerate(sim_opts.other_sources)}
         self.src_embed_map[sim_opts.src_id] = 0
 
         self.tf_dtype = tf.float32
@@ -673,11 +676,12 @@ class ExpRecurrentTrainer:
             # https://stackoverflow.com/questions/38694111/
             self.sess.graph.finalize()
 
-    def _create_exp_broadcaster(self, seed):
+    def _create_exp_broadcaster(self, seed, t_min):
         """Create a new exp_broadcaster with the current params."""
         return exp_sampler.ExpRecurrentBroadcaster(src_id=self.src_id,
                                                    seed=seed,
-                                                   trainer=self)
+                                                   trainer=self,
+                                                   t_min=t_min)
 
     def run_sim(self, seed, randomize_other_sources=True):
         """Run one simulation and return the dataframe.
@@ -687,7 +691,7 @@ class ExpRecurrentTrainer:
         if randomize_other_sources:
             run_sim_opts = run_sim_opts.randomize_other_sources(using_seed=seed)
 
-        exp_b = self._create_exp_broadcaster(seed=seed * 3)
+        exp_b = self._create_exp_broadcaster(seed=seed * 3, t_min=self.t_min)
         mgr = run_sim_opts.create_manager_with_broadcaster(exp_b)
 
         # The +1 is to allow us to detect when the number of events is
@@ -924,9 +928,12 @@ class ExpRecurrentTrainer:
         else:
             self.saver.restore(self.sess, chkpt.model_checkpoint_path)
 
-    def calc_u(self, h_states, feed_dict, batch_size, times):
+    def calc_u(self, h_states, feed_dict, batch_size, times, batch_time_start=None):
         """Calculate u(t) at the times provided."""
         # TODO: May not work if abs_max_events is hit.
+
+        if batch_time_start is None:
+            batch_time_start = np.zeros(batch_size)
 
         feed_dict[self.calc_u_h_states] = h_states
         feed_dict[self.calc_u_batch_size] = [batch_size]
@@ -1012,7 +1019,8 @@ class ExpRecurrentTrainer:
             # TODO: This sampler needs to change from ExpCDFSampler to
             # SigmoidCDFSampler.
             sampler = exp_sampler.ExpCDFSampler(vt=vt, wt=wt, bt=bt,
-                                                init_h=init_h, t_min=self.t_min,
+                                                init_h=init_h,
+                                                t_min=batch_time_start[idx],
                                                 seed=42)
             sampler_LL.append(
                 float(
