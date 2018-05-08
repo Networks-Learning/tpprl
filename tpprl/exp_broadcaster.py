@@ -754,7 +754,7 @@ class ExpRecurrentTrainer:
             batch_len = int(batch_seq_len[idx])
 
             # If the rank of our broadcaster is 'nan', then make it zero.
-            rank_in_tau = RU.rank_of_src_in_df(df=df, src_id=self.src_id).fillna(0.0)
+            rank_in_tau = RU.rank_of_src_in_df(df=df, src_id=self.src_id, with_time=False).fillna(0.0)
 
             # If there is a follower who has not seen a single event in the df,
             # Then
