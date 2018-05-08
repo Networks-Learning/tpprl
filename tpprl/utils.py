@@ -61,21 +61,7 @@ def average_gradients(tower_grads):
     return average_grads
 
 
-def get_test_dfs(trainer, seeds, t_min, t_max):
+def get_test_dfs(trainer, seeds, t_min=None, t_max=None):
     """Calculate the dataframes after running the trainer on the seeds."""
     seeds = list(seeds)
     return [trainer.run_sim(seed) for seed in seeds]
-
-
-def get_test_perf(trainer, seeds, t_min, t_max):
-    """Takes the trainer and performs simulations for the given set of seeds."""
-
-    seeds = list(seeds)
-
-    dfs = get_test_dfs(trainer, seeds, t_min, t_max)
-    f_d = trainer.get_feed_dict(dfs, is_test=True)
-    h_states = trainer.sess.run(trainer.h_states, feed_dict=f_d)
-
-    times = np.arange(t_min, t_max, (t_max - t_min) / 5000)
-    return trainer.calc_u(h_states=h_states, feed_dict=f_d,
-                          batch_size=len(seeds), times=times)
