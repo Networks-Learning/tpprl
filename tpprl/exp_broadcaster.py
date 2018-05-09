@@ -74,6 +74,8 @@ def get_test_perf(trainer, seeds, t_min=None, t_max=None):
 
 def _worker_sim(params):
     """Worker for the parallel simulation runner."""
+    warnings.warn('t_min may not be correct set.')
+
     rl_b_args, seed = params
     rl_b_opts = Deco.Options(**rl_b_args)
 
@@ -1259,9 +1261,45 @@ def make_real_data_batch_df(trainer, N, seed, one_user_data, is_test):
         return batch_df, sim_opts
 
 
-def get_real_data_mgr(trainer, t_min, batch_sim_opt, seed):
+def get_real_data_mgr_tf(trainer, t_min, batch_sim_opt, seed):
     """Runs a simulation and returns a batch_sim_opt. Runs the simulations sequentially."""
-    exp_b = trainer._create_exp_broadcaster(seed=seed, t_min=t_min)
+    exp_b = trainer._create_exp_broadcaster(seed=seed * 3, t_min=t_min)
+    mgr = batch_sim_opt.create_manager_with_broadcaster(exp_b)
+    mgr.state.time = t_min
+    return mgr
+
+
+def get_real_data_mgr_np(trainer, t_min, batch_sim_opt, seed):
+    """Runs a simulation and returns a batch_sim_opt. Runs the simulations sequentially."""
+    rl_b_args = {
+        'src_id': trainer.src_id,
+        't_min': t_min,
+
+        'sim_opts': trainer.sim_opts,
+        'max_events': trainer.abs_max_events,
+        'src_embed_map': trainer.src_embed_map,
+
+        'Wm': trainer.sess.run(trainer.tf_Wm),
+        'Wh': trainer.sess.run(trainer.tf_Wh),
+        'Wr': trainer.sess.run(trainer.tf_Wr),
+        'Wt': trainer.sess.run(trainer.tf_Wt),
+        'Bh': trainer.sess.run(trainer.tf_Bh),
+
+        'wt': trainer.sess.run(trainer.tf_wt),
+        'vt': trainer.sess.run(trainer.tf_vt),
+        'bt': trainer.sess.run(trainer.tf_bt),
+        'init_h': trainer.sess.run(trainer.tf_h),
+
+        'reward_kind': trainer.reward_kind,
+        'reward_opts': make_reward_opts(trainer),
+    }
+    rl_b_opts = Deco.Options(**rl_b_args)
+
+    # Need to select the sampler somehow.
+    exp_b = ExpRecurrentBroadcasterMP(
+        _opts=rl_b_opts,
+        seed=seed * 3
+    )
     mgr = batch_sim_opt.create_manager_with_broadcaster(exp_b)
     mgr.state.time = t_min
     return mgr
@@ -1269,7 +1307,7 @@ def get_real_data_mgr(trainer, t_min, batch_sim_opt, seed):
 
 def run_real_data_sim(trainer, t_min, batch_sim_opt, seed):
     """Runs a simulation and returns a batch_sim_opt. Runs the simulations sequentially."""
-    mgr = get_real_data_mgr(trainer, t_min, batch_sim_opt, seed)
+    mgr = get_real_data_mgr_np(trainer, t_min, batch_sim_opt, seed)
     mgr.run_dynamic()
     return mgr.get_state().get_dataframe()
 
