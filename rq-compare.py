@@ -3,8 +3,10 @@ import click
 import dill
 import os
 import tpprl.exp_broadcaster as EB
+from tpprl.utils import _now
 import tensorflow as tf
 import numpy as np
+import warnings
 
 
 def log_eval(u_data):
@@ -34,17 +36,23 @@ def log_eval(u_data):
 @click.option('--with-summaries/--no-with-summaries', 'with_summaries', help='Whether to produce summaries in output_dir.', default=False)
 @click.option('--reward', 'reward_kind', help='What kind of reward to use.', default='r_2_reward')
 @click.option('--reward-top-k', 'K', help='The K in top-k reward.', default=1)
-def run(all_user_data_file, user_idx, output_dir, q, N, gpu, reward_kind, K,
-        hidden_dims, only_cpu, with_summaries, epochs, num_iters, save_every):
+@click.option('--restore/--no-restore', 'should_restore', help='Whether to restore from a previous save, if present.', default=True)
+@click.option('--until', 'until', help='How many steps of iterations to run.', default=10000)
+def run(all_user_data_file, user_idx, output_dir, q, N, gpu, reward_kind, K, should_restore,
+        hidden_dims, only_cpu, with_summaries, epochs, num_iters, save_every, until):
     """Read data from `all_user_data`, extract `user_idx` from the array and run code for it."""
 
     assert reward_kind in [EB.R_2_REWARD, EB.TOP_K_REWARD], '"{}" is not recognized as a reward_kind.'.format(reward_kind)
+
+    save_dir = os.path.join(output_dir, 'train-save-user_idx-{}'.format(user_idx))
+    if not os.path.exists(save_dir) and should_restore:
+        warnings.warn('{} does not exist, will NOT RESTORE.'.format(save_dir))
 
     with open(all_user_data_file, 'rb') as f:
         all_user_data = dill.load(f)
         one_user_data = all_user_data[user_idx]
 
-    print('Making the trainer ...')
+    print(_now(), 'Making the trainer ...')
     sim_opts = one_user_data['sim_opts'].update({'q': q})
 
     num_other_broadcasters = len(sim_opts.other_sources)
@@ -70,7 +78,7 @@ def run(all_user_data_file, user_idx, output_dir, q, N, gpu, reward_kind, K,
         num_followers=num_followers,
         with_advantage=with_advantage,
         summary_dir=os.path.join(output_dir, 'train-summary-user_idx-{}'.format(user_idx)),
-        save_dir=os.path.join(output_dir, 'train-save-user_idx-{}'.format(user_idx)),
+        save_dir=save_dir,
     )
 
     config = tf.ConfigProto(allow_soft_placement=True)
@@ -80,8 +88,36 @@ def run(all_user_data_file, user_idx, output_dir, q, N, gpu, reward_kind, K,
         _opts=trainer_opts,
         sess=sess
     )
-    print('trainer made.')
+    print(_now(), 'trainer made.')
+
+    user_opts_dict = {}
+    user_opts_dict['trainer_opts_dict'] = trainer_opts._get_dict()
+    user_opts_dict['num_other_broadcasters'] = len(trainer.sim_opts.other_sources)
+    user_opts_dict['hidden_dims'] = trainer.num_hidden_states
+    user_opts_dict['num_followers'] = len(trainer.sim_opts.sink_ids)
+    user_opts_dict['seed'] = 42
+
+    # Needed for experiments later
+    user_opts_dict['N'] = N
+
+    with open(os.path.join(trainer.save_dir, 'user_opt_dict.dill'), 'wb') as f:
+        dill.dump(user_opts_dict, f)
+
     trainer.initialize(finalize=True)
+
+    if should_restore and os.path.exists(save_dir):
+        try:
+            trainer.restore()
+        except FileNotFoundError:
+            warnings.warn('"{}" exists, but no save files were found. Not restoring.'.format(save_dir))
+
+    global_steps = trainer.sess.run(trainer.global_step)
+    if global_steps > until:
+        print(
+            _now(),
+            'Have already run {} > {} iterations, not going further.'
+            .format(global_steps, until)
+        )
 
     op_dir = os.path.join(output_dir, 'u_data-user_idx-{}/'.format(user_idx))
     os.makedirs(op_dir, exist_ok=True)
@@ -100,15 +136,25 @@ def run(all_user_data_file, user_idx, output_dir, q, N, gpu, reward_kind, K,
             with_summaries=with_summaries
         )
 
-        u_datas.append(EB.get_real_data_eval(trainer, one_user_data, N=N, with_red_queen=True))
+        u_datas.append(
+            EB.get_real_data_eval(
+                trainer,
+                one_user_data,
+                N=N,
+                with_red_queen=True,
+                with_df=epoch == epochs - 1
+            )
+        )
         log_eval(u_datas[-1])
 
         if (epoch + 1) % save_every == 0 or epoch == epochs - 1:
-            op_file_name = os.path.join(op_dir, 'u_data-{}.dill'.format(epoch))
+            step = trainer.sess.run(trainer.global_step)
+            file_name = 'u_data-{}.dill' if epoch != epochs - 1 else 'u_data-{}-final.dill'
+            op_file_name = os.path.join(op_dir, file_name.format(step))
             with open(op_file_name, 'wb') as f:
                 dill.dump(u_datas, f)
 
-            print('Saved: {}'.format(op_file_name))
+            print(_now(), 'Saved: {}'.format(op_file_name))
 
 
 if __name__ == '__main__':

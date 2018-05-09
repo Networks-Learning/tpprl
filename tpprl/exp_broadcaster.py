@@ -1098,8 +1098,12 @@ class ExpRecurrentTrainer:
         }
 
 
-def get_real_data_eval(trainer, sample_data, N, init_seed=190, with_red_queen=False):
-    """Evaluate the current strategy with multiple executions on the last window."""
+def get_real_data_eval(trainer, sample_data, N, init_seed=190, with_red_queen=False, with_df=False):
+    """Evaluate the current strategy with multiple executions on the last window.
+
+    with_red_queen controls whether red_queen would be run with the same 'q' and results reported.
+    with_df determines whether the dataframes will be returned as a part of u_data. Should be used with caution because the resulting data-frames can contain several thousand rows each.
+    """
 
     test_dfs, window_start, window_end, batch_sim_opts = make_real_data_batch_df(
         trainer,
@@ -1120,6 +1124,10 @@ def get_real_data_eval(trainer, sample_data, N, init_seed=190, with_red_queen=Fa
         times=times,
         batch_time_start=batch_time_start
     )
+
+    if with_df:
+        u_data['test_dfs'] = test_dfs
+
     rewards = [reward_fn(df=df,
                          reward_kind=trainer.reward_kind,
                          reward_opts=make_reward_opts(trainer),
@@ -1134,6 +1142,9 @@ def get_real_data_eval(trainer, sample_data, N, init_seed=190, with_red_queen=Fa
         mgr.run_dynamic()
         poisson_dfs.append(mgr.get_state().get_dataframe())
 
+    if with_df:
+        u_data['poisson_dfs'] = poisson_dfs
+
     u_data['poisson_perf'] = [0.5 * RU.int_r_2(poisson_dfs[idx], batch_sim_opts[idx]) +
                               0.5 * trainer.q * (RU.num_tweets_of(test_dfs[idx], broadcaster_id=trainer.src_id) / (end - start)) ** 2
                                for idx, (start, end) in enumerate(zip(batch_time_start, batch_time_end))]
@@ -1147,6 +1158,9 @@ def get_real_data_eval(trainer, sample_data, N, init_seed=190, with_red_queen=Fa
             mgr = batch_sim_opt.update({'q': trainer.q}).create_manager_with_opt(seed=init_seed * 90 + idx)
             mgr.run_dynamic()
             RQ_dfs.append(mgr.get_state().get_dataframe())
+
+        if with_df:
+            u_data['RQ_dfs'] = RQ_dfs
 
         u_data['RQ_perf'] = [RU.int_r_2(RQ_dfs[idx], batch_sim_opts[idx])
                              for idx in range(len(batch_sim_opts))]
