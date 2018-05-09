@@ -24,7 +24,7 @@ def log_eval(u_data):
 @click.argument('user_idx', type=int)
 @click.argument('output_dir')
 @click.option('--N', 'N', help='How many posts to consider in a window.', default=300)
-@click.option('--q', help='Weight of the regularizer.', default=100)
+@click.option('--q', help='Weight of the regularizer.', default=100.0)
 @click.option('--gpu', help='Which GPU device to use.', default='/gpu:0')
 @click.option('--hidden-dims', 'hidden_dims', help='Which GPU device to use.', default=8)
 @click.option('--epochs', 'epochs', help='How many batches to train for.', default=200)
@@ -33,7 +33,8 @@ def log_eval(u_data):
 @click.option('--only-cpu/--no-only-cpu', 'only_cpu', help='Whether to use GPUs at all.', default=False)
 @click.option('--with-summaries/--no-with-summaries', 'with_summaries', help='Whether to produce summaries in output_dir.', default=False)
 @click.option('--reward', 'reward_kind', help='What kind of reward to use.', default='r_2_reward')
-def run(all_user_data_file, user_idx, output_dir, q, N, gpu, reward_kind,
+@click.option('--reward-top-k', 'K', help='The K in top-k reward.', default=1)
+def run(all_user_data_file, user_idx, output_dir, q, N, gpu, reward_kind, K,
         hidden_dims, only_cpu, with_summaries, epochs, num_iters, save_every):
     """Read data from `all_user_data`, extract `user_idx` from the array and run code for it."""
 
@@ -62,7 +63,7 @@ def run(all_user_data_file, user_idx, output_dir, q, N, gpu, reward_kind,
         num_other_broadcasters=num_other_broadcasters,
         only_cpu=only_cpu,
         max_events=max_events,
-        reward_top_k=1,
+        reward_top_k=K,
         reward_kind=reward_kind,
         batch_size=batch_size,
         decay_steps=decay_steps,
