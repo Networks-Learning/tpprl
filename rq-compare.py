@@ -27,7 +27,7 @@ def log_eval(u_data):
 @click.argument('output_dir')
 @click.option('--N', 'N', help='How many posts to consider in a window.', default=300)
 @click.option('--q', help='Weight of the regularizer.', default=100.0)
-@click.option('--gpu', help='Which GPU device to use.', default='/gpu:0')
+@click.option('--gpu', help='Which GPU device to use.', default='/gpu:0')  # Is also effected by masking via CUDA_VISIBLE_DEVICES.
 @click.option('--hidden-dims', 'hidden_dims', help='Which GPU device to use.', default=8)
 @click.option('--epochs', 'epochs', help='How many batches to train for.', default=200)
 @click.option('--num-iters', 'num_iters', help='How many batches to train for.', default=5)
@@ -38,8 +38,11 @@ def log_eval(u_data):
 @click.option('--reward-top-k', 'K', help='The K in top-k reward.', default=1)
 @click.option('--restore/--no-restore', 'should_restore', help='Whether to restore from a previous save, if present.', default=True)
 @click.option('--until', 'until', help='How many steps of iterations to run.', default=10000)
+@click.option('--log-device-placement/--no-log-device-placement', 'log_device_placement', help='Whether to list which GPU is being used.', default=False)
+@click.option('--allow-growth/--no-allow-growth', 'allow_growth', help='Whether to grow GPU memory or allocate all together.', default=True)
 def run(all_user_data_file, user_idx, output_dir, q, N, gpu, reward_kind, K, should_restore,
-        hidden_dims, only_cpu, with_summaries, epochs, num_iters, save_every, until):
+        hidden_dims, only_cpu, with_summaries, epochs, num_iters, save_every, until,
+        log_device_placement, allow_growth):
     """Read data from `all_user_data`, extract `user_idx` from the array and run code for it."""
 
     assert reward_kind in [EB.R_2_REWARD, EB.TOP_K_REWARD], '"{}" is not recognized as a reward_kind.'.format(reward_kind)
@@ -60,7 +63,6 @@ def run(all_user_data_file, user_idx, output_dir, q, N, gpu, reward_kind, K, sho
 
     max_events = 50000
     decay_steps = 1
-    reward_kind = EB.R_2_REWARD
     with_advantage = True
     batch_size = 16
 
@@ -81,7 +83,12 @@ def run(all_user_data_file, user_idx, output_dir, q, N, gpu, reward_kind, K, sho
         save_dir=save_dir,
     )
 
-    config = tf.ConfigProto(allow_soft_placement=True)
+    config = tf.ConfigProto(
+        allow_soft_placement=True,
+        log_device_placement=log_device_placement
+    )
+    config.gpu_options.allow_growth = allow_growth
+
     sess = tf.Session(config=config)
     trainer = EB.ExpRecurrentTrainer(
         sim_opts=sim_opts,
@@ -100,6 +107,7 @@ def run(all_user_data_file, user_idx, output_dir, q, N, gpu, reward_kind, K, sho
     # Needed for experiments later
     user_opts_dict['N'] = N
 
+    os.makedirs(trainer.save_dir, exist_ok=True)
     with open(os.path.join(trainer.save_dir, 'user_opt_dict.dill'), 'wb') as f:
         dill.dump(user_opts_dict, f)
 
@@ -108,7 +116,7 @@ def run(all_user_data_file, user_idx, output_dir, q, N, gpu, reward_kind, K, sho
     if should_restore and os.path.exists(save_dir):
         try:
             trainer.restore()
-        except FileNotFoundError:
+        except (FileNotFoundError, AttributeError):
             warnings.warn('"{}" exists, but no save files were found. Not restoring.'.format(save_dir))
 
     global_steps = trainer.sess.run(trainer.global_step)
