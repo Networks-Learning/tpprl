@@ -1187,65 +1187,65 @@ def train_real_data(trainer, N, one_user_data, num_iters, init_seed, with_summar
     loss_op = trainer.loss_stack
 
     for epoch in range(num_iters):
-            batch = []
-            seed_end = seed_start + trainer.batch_size
+        batch = []
+        seed_end = seed_start + trainer.batch_size
 
-            # seeds = range(seed_start, seed_end)
+        # seeds = range(seed_start, seed_end)
 
-            batch, batch_sim_opts = make_real_data_batch_df(
-                trainer,
-                N=N,
-                seed=seed_start,
-                one_user_data=one_user_data,
-                is_test=False
-            )
-            batch_end_times = [x.end_time for x in batch_sim_opts]
-            pre_comp_batch_rewards = None
+        batch, batch_sim_opts = make_real_data_batch_df(
+            trainer,
+            N=N,
+            seed=seed_start,
+            one_user_data=one_user_data,
+            is_test=False
+        )
+        batch_end_times = [x.end_time for x in batch_sim_opts]
+        pre_comp_batch_rewards = None
 
-            # Have not implemented with_MP because it didn't seem to offer any advantage.
-            # batch, pre_comp_batch_rewards = zip(*run_sims_MP(trainer=self, seeds=seeds))
+        # Have not implemented with_MP because it didn't seem to offer any advantage.
+        # batch, pre_comp_batch_rewards = zip(*run_sims_MP(trainer=self, seeds=seeds))
 
-            num_events = [df.event_id.nunique() for df in batch]
-            num_our_events = [RU.num_tweets_of(df, sim_opts=trainer.sim_opts)
-                              for df in batch]
+        num_events = [df.event_id.nunique() for df in batch]
+        num_our_events = [RU.num_tweets_of(df, sim_opts=trainer.sim_opts)
+                          for df in batch]
 
-            f_d = trainer.get_feed_dict(
-                batch,
-                pre_comp_batch_rewards=pre_comp_batch_rewards,
-                batch_end_times=batch_end_times
-            )
+        f_d = trainer.get_feed_dict(
+            batch,
+            pre_comp_batch_rewards=pre_comp_batch_rewards,
+            batch_end_times=batch_end_times
+        )
 
-            if with_summaries:
-                reward, LL, loss, grad_norm, summaries, step, lr, _ = \
-                    trainer.sess.run([trainer.tf_batch_rewards, LL_op, loss_op,
-                                      grad_norm_op, trainer.tf_merged_summaries,
-                                      trainer.global_step, trainer.tf_learning_rate,
-                                      train_op],
-                                     feed_dict=f_d)
-                train_writer.add_summary(summaries, step)
-            else:
-                reward, LL, loss, grad_norm, step, lr, _ = \
-                    trainer.sess.run([trainer.tf_batch_rewards, LL_op, loss_op,
-                                      grad_norm_op, trainer.global_step,
-                                      trainer.tf_learning_rate, train_op],
-                                     feed_dict=f_d)
-            mean_LL = np.mean(LL)
-            mean_loss = np.mean(loss)
-            mean_reward = np.mean(reward)
+        if with_summaries:
+            reward, LL, loss, grad_norm, summaries, step, lr, _ = \
+                trainer.sess.run([trainer.tf_batch_rewards, LL_op, loss_op,
+                                  grad_norm_op, trainer.tf_merged_summaries,
+                                  trainer.global_step, trainer.tf_learning_rate,
+                                  train_op],
+                                 feed_dict=f_d)
+            train_writer.add_summary(summaries, step)
+        else:
+            reward, LL, loss, grad_norm, step, lr, _ = \
+                trainer.sess.run([trainer.tf_batch_rewards, LL_op, loss_op,
+                                  grad_norm_op, trainer.global_step,
+                                  trainer.tf_learning_rate, train_op],
+                                 feed_dict=f_d)
+        mean_LL = np.mean(LL)
+        mean_loss = np.mean(loss)
+        mean_reward = np.mean(reward)
 
-            print('{} Run {}, LL {:.5f}, loss {:.5f}, Rwd {:.5f}'
-                  ', CTG {:.5f}, seeds {}--{}, grad_norm {:.5f}, step = {}'
-                  ', lr = {:.5f}, events = {:.2f}/{:.2f}'
-                  .format(_now(), epoch, mean_LL, mean_loss,
-                          mean_reward, mean_reward + mean_loss,
-                          seed_start, seed_end - 1, grad_norm, step, lr,
-                          np.mean(num_our_events), np.mean(num_events)))
+        print('{} Run {}, LL {:.5f}, loss {:.5f}, Rwd {:.5f}'
+              ', CTG {:.5f}, seeds {}--{}, grad_norm {:.5f}, step = {}'
+              ', lr = {:.5f}, events = {:.2f}/{:.2f}'
+              .format(_now(), epoch, mean_LL, mean_loss,
+                      mean_reward, mean_reward + mean_loss,
+                      seed_start, seed_end - 1, grad_norm, step, lr,
+                      np.mean(num_our_events), np.mean(num_events)))
 
-            chkpt_file = os.path.join(trainer.save_dir, 'tpprl.ckpt')
-            trainer.saver.save(trainer.sess, chkpt_file, global_step=trainer.global_step,)
+        chkpt_file = os.path.join(trainer.save_dir, 'tpprl.ckpt')
+        trainer.saver.save(trainer.sess, chkpt_file, global_step=trainer.global_step,)
 
-            # Ready for the next epoch.
-            seed_start = seed_end
+        # Ready for the next epoch.
+        seed_start = seed_end
 
 
 def make_real_data_batch_df(trainer, N, seed, one_user_data, is_test):
@@ -1358,7 +1358,7 @@ def make_real_data_batch_sim_opts(one_user_data, N, is_test, seed):
         # In that case, select a different window.
         RS = np.random.RandomState(seed=seed)
         while True:
-            window_start = RS.rand() * (duration - 2 * window_len)
+            window_start = start_time + RS.rand() * (duration - 2 * window_len)
             window_end = window_start + window_len
 
             new_sim_opts = prune_sim_opts(
@@ -1393,6 +1393,7 @@ def make_NN_for(sim_opts, run_num, trainer_opts=None):
                                                          with_advantage=with_advantage,
                                                          summary_dir='./tpprl.summary-real-data/train-{}/'.format(run_num),
                                                          save_dir='./tpprl.save-real-data/'.format(sim_opts.q))
-    sess = tf.Session()
+    config = tf.ConfigProto(allow_soft_placement=True)
+    sess = tf.Session(config=config)
     trainer = ExpRecurrentTrainer(sim_opts=sim_opts, _opts=trainer_opts, sess=sess)
     return trainer
