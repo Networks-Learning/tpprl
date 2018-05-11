@@ -39,6 +39,15 @@ def reward_fn(df, reward_kind, reward_opts, sim_opts):
                                   .format(reward_kind))
 
 
+def make_reward_opts_from_opts_dict(trainer_opts_dict):
+    """Collects all reward related options into a dictionary."""
+    return {
+        'K': trainer_opts_dict['reward_top_k'],
+        'target': trainer_opts_dict['reward_episode_target'],
+        's': trainer_opts_dict['reward_target_weight'],
+    }
+
+
 def make_reward_opts(trainer):
     """Collects all reward related options into a dictionary."""
     return {
@@ -191,6 +200,14 @@ def mk_def_exp_recurrent_trainer_opts(num_other_broadcasters, hidden_dims,
     return def_exp_recurrent_trainer_opts.set(**kwargs)
 
 
+def make_src_embed(sim_opts):
+    """Maps the src_id of the other sources to [0, N]."""
+    src_embed_map = {x[1]['src_id']: idx + 1
+                     for idx, x in enumerate(sim_opts.other_sources)}
+    src_embed_map[sim_opts.src_id] = 0
+    return src_embed_map
+
+
 class ExpRecurrentTrainer:
     @Deco.optioned()
     def __init__(self, Wm, Wh, Wt, Wr, Bh, vt, wt, bt, num_hidden_states,
@@ -218,10 +235,8 @@ class ExpRecurrentTrainer:
         # self.src_embed_map = {x.src_id: idx + 1
         #                       for idx, x in enumerate(sim_opts.create_other_sources())}
 
-        # To handle multiple reloads
-        self.src_embed_map = {x[1]['src_id']: idx + 1
-                              for idx, x in enumerate(sim_opts.other_sources)}
-        self.src_embed_map[sim_opts.src_id] = 0
+        # To handle multiple reloads of redqueen related modules.
+        self.src_embed_map = make_src_embed(sim_opts)
 
         self.tf_dtype = tf.float32
         self.np_dtype = np.float32
@@ -715,7 +730,9 @@ class ExpRecurrentTrainer:
         return mgr.get_state().get_dataframe()
 
     def get_feed_dict(self, batch_df, is_test=False,
-                      pre_comp_batch_rewards=None, batch_end_times=None):
+                      pre_comp_batch_rewards=None,
+                      batch_end_times=None,
+                      batch_sim_opts=None):
         """Produce a feed_dict for the given batch."""
 
         # assert all(df.sink_id.nunique() == 1 for df in batch_df), "Can only handle one sink at the moment."
@@ -747,10 +764,10 @@ class ExpRecurrentTrainer:
                 reward_fn(
                     df=x,
                     reward_kind=self.reward_kind,
-                    reward_opts={'K': self.reward_top_k},
-                    sim_opts=self.sim_opts
+                    reward_opts=make_reward_opts(self),
+                    sim_opts=batch_sim_opts[idx] if batch_sim_opts is not None else self.sim_opts
                 )
-                for x in batch_df
+                for idx, x in enumerate(batch_df)
             ])[:, np.newaxis]
 
         batch_t_deltas = np.zeros(shape=full_shape, dtype=float)
@@ -1114,7 +1131,9 @@ def get_real_data_eval(trainer, sample_data, N, init_seed=190, with_red_queen=Fa
     )
     batch_time_start = [df.t.min() for df in test_dfs]
     batch_time_end = [df.t.max() for df in test_dfs]
-    test_f_d = trainer.get_feed_dict(test_dfs, batch_end_times=batch_time_end)
+    test_f_d = trainer.get_feed_dict(test_dfs,
+                                     batch_end_times=batch_time_end,
+                                     batch_sim_opts=batch_sim_opts)
     h_states = trainer.sess.run(trainer.h_states_stack, feed_dict=test_f_d)
     times = np.arange(window_start, window_end, (window_end - window_start) / 5000)
     u_data = trainer.calc_u(
@@ -1212,7 +1231,8 @@ def train_real_data(trainer, N, one_user_data, num_iters, init_seed, with_summar
         f_d = trainer.get_feed_dict(
             batch,
             pre_comp_batch_rewards=pre_comp_batch_rewards,
-            batch_end_times=batch_end_times
+            batch_end_times=batch_end_times,
+            batch_sim_opts=batch_sim_opts
         )
 
         if with_summaries:
