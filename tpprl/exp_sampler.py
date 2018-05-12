@@ -178,6 +178,52 @@ class SigmoidCDFSampler(CDFSampler):
                                             np.log1p(np.exp(c)))
 
 
+def gen_rand_vecs(dims, number, random_state):
+    return np.asarray([x / np.linalg.norm(x) for x in
+                       [random_state.standard_normal(dims) for _ in range(number)]])
+
+
+def make_prefs(sink_ids, src_ids, seed=42):
+    RS = np.random.RandomState(seed=seed)
+    sink_prefs = gen_rand_vecs(2, len(sink_ids), RS)
+    src_prefs = gen_rand_vecs(2, len(src_ids), RS)
+    return {
+        'sink_id_map': dict([(x, idx) for idx, x in enumerate(sink_ids)]),
+        'src_id_map': dict([(x, idx) for idx, x in enumerate(src_ids)]),
+        'sink_prefs': sink_prefs,
+        'src_prefs': src_prefs,
+        'seed': seed
+    }
+
+
+def algo_rank_of(past_events, sink_id, src_id, all_prefs, c=1.0):
+    """Find the algorithm rank of src_id on the feed of sink_id."""
+    rel_events = [(ev, all_prefs['src_id_map'][ev.src_id])
+                  for ev in past_events if sink_id in ev.sink_ids]
+
+    if len(rel_events) == 0:
+        return 0
+
+    t = past_events[-1].cur_time
+
+    sink_idx = all_prefs['sink_id_map'][sink_id]
+    sink_perf_vec = all_prefs['sink_prefs'][sink_idx]
+    src_prefs = all_prefs['src_prefs']
+
+    importance = sorted(
+        [(np.exp(c * (t - ev.cur_time) * (np.dot(sink_perf_vec, src_prefs[src_idx]) - 1)),
+          ev.src_id)
+         for ev, src_idx in rel_events],
+        reverse=True
+    )
+
+    for idx, (_, ev_src_id) in enumerate(importance):
+        if src_id == ev_src_id:
+            return idx
+
+    return len(importance)
+
+
 class ExpRecurrentBroadcasterMP(OM.Broadcaster):
     """This is a broadcaster which follows the intensity function as defined by
     RMTPP paper and updates the hidden state upon receiving each event.
@@ -190,7 +236,8 @@ class ExpRecurrentBroadcasterMP(OM.Broadcaster):
     @Deco.optioned()
     def __init__(self, src_id, seed, t_min,
                  Wm, Wh, Wr, Wt, Bh, sim_opts,
-                 wt, vt, bt, init_h, src_embed_map):
+                 wt, vt, bt, init_h, src_embed_map,
+                 algo_feed=False, algo_feed_args=None):
         super(ExpRecurrentBroadcasterMP, self).__init__(src_id, seed)
         self.sink_ids = sim_opts.sink_ids
         self.init = False
@@ -203,6 +250,9 @@ class ExpRecurrentBroadcasterMP(OM.Broadcaster):
         self.Bh = Bh
         self.cur_h = init_h
         self.src_embed_map = src_embed_map
+        self.algo_feed = algo_feed
+        self.algo_feed_args = algo_feed_args
+        self.algo_ranks = []
 
         # Needed for the sampler
         self.params = Deco.Options(**{
@@ -218,7 +268,24 @@ class ExpRecurrentBroadcasterMP(OM.Broadcaster):
 
     def update_hidden_state(self, src_id, time_delta):
         """Returns the hidden state after a post by src_id and time delta."""
-        r_t = np.nan_to_num(self.state.get_wall_rank(self.src_id, self.sink_ids, dict_form=False, assume_first=True).astype(float))
+
+        if self.algo_feed:
+            r_t = np.nan_to_num(
+                self.state.get_wall_rank(
+                    self.src_id,
+                    self.sink_ids,
+                    dict_form=False,
+                    assume_first=True
+                ).astype(float)
+            )
+        else:
+            r_t = np.array([
+                algo_rank_of(self.state.events, sink_id,
+                             self.src_id, self.algo_feed_args)
+                for sink_id in self.sink_ids
+            ])
+            self.algo_ranks.append(r_t)
+
         return np.tanh(
             self.Wm[self.src_embed_map[src_id], :][:, np.newaxis] +
             self.Wh.dot(self.cur_h) +
