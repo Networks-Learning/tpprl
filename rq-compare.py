@@ -106,6 +106,7 @@ def run(all_user_data_file, user_idx, output_dir, q, N, gpu, reward_kind, K, sho
 
     # Needed for experiments later
     user_opts_dict['N'] = N
+    user_opts_dict['q'] = q
 
     os.makedirs(trainer.save_dir, exist_ok=True)
     with open(os.path.join(trainer.save_dir, 'user_opt_dict.dill'), 'wb') as f:
@@ -144,25 +145,34 @@ def run(all_user_data_file, user_idx, output_dir, q, N, gpu, reward_kind, K, sho
             with_summaries=with_summaries
         )
 
+        step = trainer.sess.run(trainer.global_step)
+        with_df = (epoch == epochs - 1) or (step > until)
+
         u_datas.append(
             EB.get_real_data_eval(
                 trainer,
                 one_user_data,
                 N=N,
                 with_red_queen=True,
-                with_df=epoch == epochs - 1
+                with_df=with_df
             )
         )
         log_eval(u_datas[-1])
 
-        if (epoch + 1) % save_every == 0 or epoch == epochs - 1:
-            step = trainer.sess.run(trainer.global_step)
-            file_name = 'u_data-{}.dill' if epoch != epochs - 1 else 'u_data-{}-final.dill'
+        if (epoch + 1) % save_every == 0 or with_df:
+            file_name = 'u_data-{}.dill' if not with_df else 'u_data-{}-final.dill'
             op_file_name = os.path.join(op_dir, file_name.format(step))
             with open(op_file_name, 'wb') as f:
                 dill.dump(u_datas, f)
 
             print(_now(), 'Saved: {}'.format(op_file_name))
+
+            if step > until:
+                print(
+                    _now(),
+                    'Have already run {} > {} iterations, not going further.'
+                    .format(global_steps, until)
+                )
 
 
 if __name__ == '__main__':
