@@ -269,7 +269,7 @@ class ExpRecurrentBroadcasterMP(OM.Broadcaster):
     def update_hidden_state(self, src_id, time_delta):
         """Returns the hidden state after a post by src_id and time delta."""
 
-        if self.algo_feed:
+        if not self.algo_feed:
             r_t = np.nan_to_num(
                 self.state.get_wall_rank(
                     self.src_id,
