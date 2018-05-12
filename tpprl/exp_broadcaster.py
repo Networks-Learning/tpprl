@@ -5,7 +5,7 @@ import tensorflow as tf
 import decorated_options as Deco
 import warnings
 import multiprocessing as MP
-
+from tensorflow.python import pywrap_tensorflow
 
 # DEBUG ONLY
 try:
@@ -1303,6 +1303,20 @@ def get_real_data_mgr_tf(trainer, t_min, batch_sim_opt, seed):
     return mgr
 
 
+def get_real_data_mgr_chpt_np(rl_b_args, t_min, batch_sim_opt, seed):
+    """Creates a manager for running experiments from data read from a checkpoint."""
+    rl_b_opts = Deco.Options(**rl_b_args)
+
+    # Need to select the sampler somehow.
+    exp_b = ExpRecurrentBroadcasterMP(
+        _opts=rl_b_opts,
+        seed=seed * 3
+    )
+    mgr = batch_sim_opt.create_manager_with_broadcaster(exp_b)
+    mgr.state.time = t_min
+    return mgr
+
+
 def get_real_data_mgr_np(trainer, t_min, batch_sim_opt, seed):
     """Runs a simulation and returns a batch_sim_opt. Runs the simulations sequentially."""
     rl_b_args = {
@@ -1327,21 +1341,19 @@ def get_real_data_mgr_np(trainer, t_min, batch_sim_opt, seed):
         'reward_kind': trainer.reward_kind,
         'reward_opts': make_reward_opts(trainer),
     }
-    rl_b_opts = Deco.Options(**rl_b_args)
-
-    # Need to select the sampler somehow.
-    exp_b = ExpRecurrentBroadcasterMP(
-        _opts=rl_b_opts,
-        seed=seed * 3
-    )
-    mgr = batch_sim_opt.create_manager_with_broadcaster(exp_b)
-    mgr.state.time = t_min
-    return mgr
+    return get_real_data_mgr_chpt_np(rl_b_args, t_min, batch_sim_opt, seed)
 
 
 def run_real_data_sim(trainer, t_min, batch_sim_opt, seed):
     """Runs a simulation and returns a batch_sim_opt. Runs the simulations sequentially."""
     mgr = get_real_data_mgr_np(trainer, t_min, batch_sim_opt, seed)
+    mgr.run_dynamic()
+    return mgr.get_state().get_dataframe()
+
+
+def run_real_data_sim_from_chpt(rl_b_args, t_min, batch_sim_opt, seed):
+    """Runs a simulation and returns a batch_sim_opt. Runs the simulations sequentially."""
+    mgr = get_real_data_mgr_chpt_np(rl_b_args, t_min, batch_sim_opt, seed)
     mgr.run_dynamic()
     return mgr.get_state().get_dataframe()
 
@@ -1417,3 +1429,32 @@ def make_NN_for(sim_opts, run_num, trainer_opts=None):
     sess = tf.Session(config=config)
     trainer = ExpRecurrentTrainer(sim_opts=sim_opts, _opts=trainer_opts, sess=sess)
     return trainer
+
+
+def rl_b_dict_from_chpt(chpt_file, one_user_data, window_start, user_opt_dict):
+    cpr = pywrap_tensorflow.NewCheckpointReader(chpt_file)
+    return {
+        'src_id': one_user_data['user_id'],
+        't_min': window_start,
+
+        'sim_opts': one_user_data['sim_opts'],
+        'max_events': 50000,
+        'src_embed_map': make_src_embed(one_user_data['sim_opts']),
+
+        'Wm': cpr.get_tensor('ExpRecurrentTrainer/hidden_state/Wm'),
+        'Wh': cpr.get_tensor('ExpRecurrentTrainer/hidden_state/Wh'),
+        'Wr': cpr.get_tensor('ExpRecurrentTrainer/hidden_state/Wr'),
+        'Wt': cpr.get_tensor('ExpRecurrentTrainer/hidden_state/Wt'),
+        'Bh': cpr.get_tensor('ExpRecurrentTrainer/hidden_state/Bh'),
+
+        'wt': cpr.get_tensor('ExpRecurrentTrainer/output/wt'),
+        'vt': cpr.get_tensor('ExpRecurrentTrainer/output/vt'),
+        'bt': cpr.get_tensor('ExpRecurrentTrainer/output/bt'),
+        # TODO: This will break if the initial state is non-zero
+        'init_h': np.zeros((user_opt_dict['trainer_opts_dict']['num_hidden_states'], 1)),
+
+        'reward_kind': user_opt_dict['trainer_opts_dict']['reward_kind'],
+        'reward_opts': make_reward_opts_from_opts_dict(user_opt_dict['trainer_opts_dict']),
+    }
+
+
