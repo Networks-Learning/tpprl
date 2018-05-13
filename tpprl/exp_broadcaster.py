@@ -28,7 +28,7 @@ TARGET_TOP_K_REWARD = 'target_reward'
 def reward_fn(df, reward_kind, reward_opts, sim_opts):
     """Calculate the reward for this trajectory."""
     if reward_kind == R_2_REWARD:
-        return RU.int_r_2(df, sim_opts)
+        return RU.int_r_2_true(df, sim_opts)
     elif reward_kind == TOP_K_REWARD:
         return -RU.time_in_top_k(df, sim_opts=sim_opts, K=reward_opts['K'])
     elif reward_kind == TARGET_TOP_K_REWARD:
@@ -72,11 +72,12 @@ def get_test_perf(trainer, seeds, t_min=None, t_max=None):
     times = np.arange(t_min, t_max, (t_max - t_min) / 5000)
     u_data = trainer.calc_u(h_states=h_states, feed_dict=f_d,
                             batch_size=len(seeds), times=times)
-    rewards = [reward_fn(df=df,
-                         reward_kind=trainer.reward_kind,
-                         reward_opts=make_reward_opts(trainer),
-                         sim_opts=trainer.sim_opts)
-               for df in dfs]
+    # rewards = [reward_fn(df=df,
+    #                      reward_kind=trainer.reward_kind,
+    #                      reward_opts=make_reward_opts(trainer),
+    #                      sim_opts=trainer.sim_opts)
+    #            for df in dfs]
+    rewards = f_d[trainer.tf_batch_rewards]
     u_data['rewards'] = rewards
     return u_data
 
