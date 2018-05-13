@@ -18,8 +18,9 @@ OUTPUT_DIR = "/NL/crowdjudged/work/rl-broadcast/top_k-sim-opt-fix/"
 @click.option('--K', 'k', help='K in top-k loss.', default=1)
 @click.option('--mem', 'mem', help='How much memory will each job need (MB).', default=10000)
 @click.option('--until', 'until', help='Until which step to run the experiments.', default=1000)
+@click.option('--save-every', 'save_every', help='How many epochs to save output at.', default=5)
 @click.option('--q', 'q', help='Which q value to use. Negative values imply using the value in the CSV file.', default=-1.0)
-def run(in_csv, dry, epochs, k, mem, reward_kind, output_dir, until, q):
+def run(in_csv, dry, epochs, k, mem, reward_kind, output_dir, until, q, save_every):
     """Read parameters from in_csv, ignore the host/gpu information, and execute them on using sbatch."""
     os.makedirs(os.path.join(output_dir, 'stdout'), exist_ok=True)
     df = pd.read_csv(in_csv)
@@ -33,11 +34,11 @@ def run(in_csv, dry, epochs, k, mem, reward_kind, output_dir, until, q):
         if reward_kind == 'top_k_reward':
             cmd = (f'sbatch -c 2 --mem={mem} -o "{stdout_file}" ' +
                    f'./top_k_job.sh {row.inp_file} {row.idx} "{output_dir}" ' +
-                   f'{row.N} {q} {until} {epochs} {k}')
+                   f'{row.N} {q} {until} {epochs} {k} {save_every}')
         elif reward_kind == 'r_2_reward':
             cmd = (f'sbatch -c 2 --mem={mem} -o "{stdout_file}" ' +
                    f'./r_2_job.sh {row.inp_file} {row.idx} "{output_dir}" ' +
-                   f'{row.N} {q} {until} {epochs}')
+                   f'{row.N} {q} {until} {epochs} {save_every}')
         else:
             raise ValueError("Unknown reward: {}".format(reward_kind))
 
