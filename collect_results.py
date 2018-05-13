@@ -55,6 +55,7 @@ def worker_user(params):
         'num_followers': user_opt_dict['num_followers'],
         'N': user_opt_dict['N'],
         'reward_kind': user_opt_dict['trainer_opts_dict']['reward_kind'],
+        'for_epoch': for_epoch,
     }
 
     window_start, eval_sim_opts = EB.make_real_data_batch_sim_opts(
