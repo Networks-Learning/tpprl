@@ -110,8 +110,7 @@ def _worker_sim(params):
     return df, reward
 
 
-def run_sims_MP(trainer, seeds, processes=None):
-    """Run simulations using multiprocessing."""
+def get_rl_b_args_from(trainer):
     rl_b_args = {
         'src_id': trainer.src_id,
         't_min': trainer.t_min,
@@ -135,6 +134,12 @@ def run_sims_MP(trainer, seeds, processes=None):
         'reward_opts': make_reward_opts(trainer),
     }
 
+    return rl_b_args
+
+
+def run_sims_MP(trainer, seeds, processes=None):
+    """Run simulations using multiprocessing."""
+    rl_b_args = get_rl_b_args_from(trainer)
     # return [_worker_sim((rl_b_args, seed)) for seed in seeds]
 
     with MP.Pool(processes=processes) as pool:
@@ -1320,28 +1325,8 @@ def get_real_data_mgr_chpt_np(rl_b_args, t_min, batch_sim_opt, seed):
 
 def get_real_data_mgr_np(trainer, t_min, batch_sim_opt, seed):
     """Runs a simulation and returns a batch_sim_opt. Runs the simulations sequentially."""
-    rl_b_args = {
-        'src_id': trainer.src_id,
-        't_min': t_min,
-
-        'sim_opts': trainer.sim_opts,
-        'max_events': trainer.abs_max_events,
-        'src_embed_map': trainer.src_embed_map,
-
-        'Wm': trainer.sess.run(trainer.tf_Wm),
-        'Wh': trainer.sess.run(trainer.tf_Wh),
-        'Wr': trainer.sess.run(trainer.tf_Wr),
-        'Wt': trainer.sess.run(trainer.tf_Wt),
-        'Bh': trainer.sess.run(trainer.tf_Bh),
-
-        'wt': trainer.sess.run(trainer.tf_wt),
-        'vt': trainer.sess.run(trainer.tf_vt),
-        'bt': trainer.sess.run(trainer.tf_bt),
-        'init_h': trainer.sess.run(trainer.tf_h),
-
-        'reward_kind': trainer.reward_kind,
-        'reward_opts': make_reward_opts(trainer),
-    }
+    rl_b_args = get_rl_b_args_from(trainer)
+    rl_b_args['t_min'] = t_min
     return get_real_data_mgr_chpt_np(rl_b_args, t_min, batch_sim_opt, seed)
 
 
