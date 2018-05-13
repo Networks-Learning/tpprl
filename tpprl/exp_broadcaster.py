@@ -717,7 +717,8 @@ class ExpRecurrentTrainer:
             t_min=t_min
         )
 
-    def run_sim(self, seed, randomize_other_sources=True):
+    def run_sim(self, seed, randomize_other_sources=True,
+                algo_feed=False, algo_feed_args=None):
         """Run one simulation and return the dataframe.
         Will be thread-safe and can be called multiple times."""
         run_sim_opts = self.sim_opts.copy()
@@ -725,7 +726,12 @@ class ExpRecurrentTrainer:
         if randomize_other_sources:
             run_sim_opts = run_sim_opts.randomize_other_sources(using_seed=seed)
 
-        exp_b = self._create_exp_broadcaster(seed=seed * 3, t_min=self.t_min)
+        exp_b = self._create_exp_broadcaster(
+            seed=seed * 3,
+            t_min=self.t_min,
+            algo_feed=algo_feed,
+            algo_feed_args=algo_feed_args
+        )
         mgr = run_sim_opts.create_manager_with_broadcaster(exp_b)
 
         # The +1 is to allow us to detect when the number of events is
@@ -738,7 +744,8 @@ class ExpRecurrentTrainer:
     def get_feed_dict(self, batch_df, is_test=False,
                       pre_comp_batch_rewards=None,
                       batch_end_times=None,
-                      batch_sim_opts=None):
+                      batch_sim_opts=None,
+                      algo_ranks=None):
         """Produce a feed_dict for the given batch."""
 
         # assert all(df.sink_id.nunique() == 1 for df in batch_df), "Can only handle one sink at the moment."
@@ -790,16 +797,19 @@ class ExpRecurrentTrainer:
             # They are sorted by time already.
             batch_len = int(batch_seq_len[idx])
 
-            # If the rank of our broadcaster is 'nan', then make it zero.
-            rank_in_tau = RU.rank_of_src_in_df(df=df, src_id=self.src_id, with_time=False).fillna(0.0)
+            if algo_ranks is None:
+                # If the rank of our broadcaster is 'nan', then make it zero.
+                rank_in_tau = RU.rank_of_src_in_df(df=df, src_id=self.src_id, with_time=False).fillna(0.0)
 
-            # If there is a follower who has not seen a single event in the df,
-            # Then
-            for follower_id in all_followers:
-                if follower_id not in rank_in_tau.columns:
-                    rank_in_tau[follower_id] = 0
+                # If there is a follower who has not seen a single event in the df,
+                # Then
+                for follower_id in all_followers:
+                    if follower_id not in rank_in_tau.columns:
+                        rank_in_tau[follower_id] = 0
 
-            batch_ranks[idx, 0:batch_len, :] = rank_in_tau[all_followers].values[0:batch_len, :]
+                batch_ranks[idx, 0:batch_len, :] = rank_in_tau[all_followers].values[0:batch_len, :]
+            else:
+                batch_ranks[idx, 0:batch_len, :] = algo_ranks[idx]
 
             df_unique = df.groupby('event_id').first()
             batch_b_idxes[idx, 0:batch_len] = df_unique.src_id.map(self.src_embed_map).values[0:batch_len]
@@ -873,10 +883,13 @@ class ExpRecurrentTrainer:
 
     def train_many(self, num_iters, init_seed=42,
                    clipping=True, stack_grad=True,
-                   with_summaries=False, with_MP=False):
+                   with_summaries=False, with_MP=False,
+                   algo_feed=False, algo_feed_args=False):
         """Run one SGD op given a batch of simulation."""
 
         seed_start = init_seed + self.sess.run(self.global_step) * self.batch_size
+
+        assert not algo_feed, "The implementation of training using algorithm feeds is currently elsewhere."
 
         if with_summaries:
             assert self.summary_dir is not None
@@ -902,7 +915,11 @@ class ExpRecurrentTrainer:
 
             seeds = range(seed_start, seed_end)
             if not with_MP:
-                batch = [self.run_sim(seed) for seed in seeds]
+                batch = [self.run_sim(seed,
+                                      algo_feed=algo_feed,
+                                      algo_feed_args=algo_feed_args)
+                         for seed in seeds]
+                # TODO: Calculate reward intelligently.
                 pre_comp_batch_rewards = None
             else:
                 batch, pre_comp_batch_rewards = zip(*run_sims_MP(trainer=self, seeds=seeds))
