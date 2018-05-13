@@ -7,6 +7,7 @@ from tpprl.utils import _now
 import tensorflow as tf
 import numpy as np
 import warnings
+import sys
 
 
 def log_eval(u_data):
@@ -136,6 +137,8 @@ def run(all_user_data_file, user_idx, output_dir, q, N, gpu, reward_kind, K, sho
     log_eval(u_datas[-1])
 
     for epoch in range(epochs):
+        # Ensure that the output is pushed to the SLURM file.
+        sys.stdout.flush()
         EB.train_real_data(
             trainer,
             N=N,
@@ -171,7 +174,7 @@ def run(all_user_data_file, user_idx, output_dir, q, N, gpu, reward_kind, K, sho
                 print(
                     _now(),
                     'Have already run {} > {} iterations, not going further.'
-                    .format(global_steps, until)
+                    .format(step, until)
                 )
                 break
 
