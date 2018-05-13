@@ -676,7 +676,7 @@ class ExpRecurrentTrainer:
         # ADAM optimizer uses.
         self.saver = tf.train.Saver(tf.global_variables(),
                                     keep_checkpoint_every_n_hours=0.25,
-                                    max_to_keep=100)
+                                    max_to_keep=1000)
 
         with tf.device(device_cpu):
             tf.contrib.training.add_gradients_summaries(self.avg_gradient_stack)
@@ -896,7 +896,7 @@ class ExpRecurrentTrainer:
             LL_op = self.LL
             loss_op = self.loss
 
-        for epoch in range(num_iters):
+        for iter_idx in range(num_iters):
             batch = []
             seed_end = seed_start + self.batch_size
 
@@ -938,16 +938,16 @@ class ExpRecurrentTrainer:
             print('{} Run {}, LL {:.5f}, loss {:.5f}, Rwd {:.5f}'
                   ', CTG {:.5f}, seeds {}--{}, grad_norm {:.5f}, step = {}'
                   ', lr = {:.5f}, events = {:.2f}/{:.2f}'
-                  .format(_now(), epoch, mean_LL, mean_loss,
+                  .format(_now(), iter_idx, mean_LL, mean_loss,
                           mean_reward, mean_reward + mean_loss,
                           seed_start, seed_end - 1, grad_norm, step, lr,
                           np.mean(num_our_events), np.mean(num_events)))
 
-            chkpt_file = os.path.join(self.save_dir, 'tpprl.ckpt')
-            self.saver.save(self.sess, chkpt_file, global_step=self.global_step,)
-
-            # Ready for the next epoch.
+            # Ready for the next iter_idx.
             seed_start = seed_end
+
+        chkpt_file = os.path.join(self.save_dir, 'tpprl.ckpt')
+        self.saver.save(self.sess, chkpt_file, global_step=self.global_step,)
 
     def restore(self, restore_dir=None, epoch_to_recover=None):
         """Restores the model from a saved checkpoint."""
@@ -1211,7 +1211,7 @@ def train_real_data(trainer, N, one_user_data, num_iters, init_seed, with_summar
     LL_op = trainer.LL_stack
     loss_op = trainer.loss_stack
 
-    for epoch in range(num_iters):
+    for iter_idx in range(num_iters):
         batch = []
         seed_end = seed_start + trainer.batch_size
 
@@ -1262,16 +1262,16 @@ def train_real_data(trainer, N, one_user_data, num_iters, init_seed, with_summar
         print('{} Run {}, LL {:.5f}, loss {:.5f}, Rwd {:.5f}'
               ', CTG {:.5f}, seeds {}--{}, grad_norm {:.5f}, step = {}'
               ', lr = {:.5f}, events = {:.2f}/{:.2f}'
-              .format(_now(), epoch, mean_LL, mean_loss,
+              .format(_now(), iter_idx, mean_LL, mean_loss,
                       mean_reward, mean_reward + mean_loss,
                       seed_start, seed_end - 1, grad_norm, step, lr,
                       np.mean(num_our_events), np.mean(num_events)))
 
-        chkpt_file = os.path.join(trainer.save_dir, 'tpprl.ckpt')
-        trainer.saver.save(trainer.sess, chkpt_file, global_step=trainer.global_step,)
-
-        # Ready for the next epoch.
+        # Ready for the next iter_idx.
         seed_start = seed_end
+
+    chkpt_file = os.path.join(trainer.save_dir, 'tpprl.ckpt')
+    trainer.saver.save(trainer.sess, chkpt_file, global_step=trainer.global_step,)
 
 
 def make_real_data_batch_df(trainer, N, seed, one_user_data, is_test):
