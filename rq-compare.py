@@ -173,6 +173,7 @@ def run(all_user_data_file, user_idx, output_dir, q, N, gpu, reward_kind, K, sho
                     'Have already run {} > {} iterations, not going further.'
                     .format(global_steps, until)
                 )
+                break
 
 
 if __name__ == '__main__':
