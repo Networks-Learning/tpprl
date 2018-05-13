@@ -36,6 +36,8 @@ MAX_ITERS = 50
 
 
 def read_user_data(user_data_file):
+    """Reading the user_data into a global file so that we can share it across
+    processes, without having to keep multiple copies in memory."""
     global user_data
     with open(user_data_file, 'rb') as f:
         user_data = dill.load(f)

@@ -11,7 +11,7 @@ from tensorflow.python import pywrap_tensorflow
 try:
     from .utils import variable_summaries, _now, average_gradients, get_test_dfs
     from .cells import TPPRExpCell, TPPRExpCellStacked
-    from .exp_sampler import ExpRecurrentBroadcasterMP, ExpRecurrentBroadcaster, ExpCDFSampler
+    from .exp_sampler import ExpRecurrentBroadcasterMP, ExpRecurrentBroadcaster, ExpCDFSampler, algo_true_rank, algo_top_k
     from .read_data_utils import prune_sim_opts
 except ModuleNotFoundError:
     warnings.warn('Could not import local modules. Assuming they have been loaded using %run -i')
@@ -1465,3 +1465,273 @@ def rl_b_dict_from_chpt(chpt_file, one_user_data, window_start, user_opt_dict):
     }
 
 
+def train_real_data_algo(
+    trainer, N, one_user_data, num_iters, init_seed, algo_feed_args,
+    with_summaries=False, reward_time_steps=1000, batch_c=0.5,
+    with_approx_rewards=True
+):
+    """Train using real-data for algorithm feeds.
+
+    The default value of 'c' was chosen by assuming a window of roughly 5 and
+    decay at a rate such that at the end of the window, a post will have the importance
+    of about 0.01.
+    """
+
+    seed_start = init_seed + trainer.sess.run(trainer.global_step) * trainer.batch_size
+
+    if with_summaries:
+        assert trainer.summary_dir is not None
+        os.makedirs(trainer.summary_dir, exist_ok=True)
+        train_writer = tf.summary.FileWriter(trainer.summary_dir,
+                                             trainer.sess.graph)
+    train_op = trainer.sgd_stacked_op
+    grad_norm_op = trainer.grad_norm_stack
+    LL_op = trainer.LL_stack
+    loss_op = trainer.loss_stack
+
+    for epoch in range(num_iters):
+        batch = []
+        seed_end = seed_start + trainer.batch_size
+
+        # seeds = range(seed_start, seed_end)
+
+        rl_b_args = get_rl_b_args_from(trainer)
+        rl_b_args['algo_feed'] = True
+        rl_b_args['algo_feed_args'] = algo_feed_args
+
+        batch, batch_sim_opts, rewards, batch_algo_ranks = [], [], [], []
+        for batch_idx in range(trainer.batch_size):
+            sim_opt_seed = seed_start + batch_idx * 9
+            mgr_seed = seed_start * 91 + batch_idx
+            window_start, batch_sim_opt = make_real_data_batch_sim_opts(
+                one_user_data,
+                N=N,
+                is_test=False,
+                seed=sim_opt_seed
+            )
+            batch_sim_opts.append(batch_sim_opt)
+            rl_b_args['t_min'] = window_start
+
+            exp_b = ExpRecurrentBroadcasterMP(_opts=Deco.Options(**rl_b_args),
+                                              seed=mgr_seed * 3)
+
+            mgr = batch_sim_opt.create_manager_with_broadcaster(exp_b)
+            mgr.state.time = window_start
+            mgr.run_dynamic()
+            batch.append(mgr.get_state().get_dataframe())
+
+            algo_ranks = np.asarray(exp_b.algo_ranks)
+            batch_algo_ranks.append(algo_ranks)
+
+            end_time = batch_sim_opt.end_time
+            last_event_time = exp_b.state.events[-1].cur_time
+            survival_time = end_time - last_event_time
+            r_dt = np.asarray([ev.time_delta for ev in exp_b.state.events] +
+                              [survival_time])
+
+            if trainer.reward_kind == R_2_REWARD:
+                if with_approx_rewards:
+                    reward = ((algo_ranks ** 2).mean(1) * r_dt[1:]).sum()
+                else:
+                    times, ranks = algo_true_rank(
+                        sink_ids=batch_sim_opt.sink_ids,
+                        src_id=batch_sim_opt.src_id,
+                        events=exp_b.state.events,
+                        start_time=window_start,
+                        end_time=batch_sim_opt.end_time,
+                        steps=reward_time_steps,
+                        all_prefs=algo_feed_args,
+                        square=True,
+                        c=batch_c,
+                    )
+                    dt = (times[1] - times[0])
+                    reward = np.sum(ranks) * dt
+            elif trainer.reward_kind == TOP_K_REWARD:
+                if with_approx_rewards:
+                    reward = -(np.where(algo_ranks < trainer.reward_top_k, 1.0, 0.0).mean(1) * r_dt[1:]).sum() + r_dt[0]
+                else:
+                    times, top_ks = algo_top_k(
+                        sink_ids=batch_sim_opt.sink_ids,
+                        src_id=batch_sim_opt.src_id,
+                        events=exp_b.state.events,
+                        start_time=window_start,
+                        end_time=batch_sim_opt.end_time,
+                        steps=reward_time_steps,
+                        all_prefs=algo_feed_args,
+                        K=trainer.reward_top_k,
+                        c=batch_c,
+                    )
+                    dt = (times[1] - times[0])
+                    reward = np.sum(top_ks) * dt
+            else:
+                raise RuntimeError('Unknown reward: {}'.format(trainer.reward_kind))
+
+            rewards.append(reward)
+
+        batch_end_times = [x.end_time for x in batch_sim_opts]
+        pre_comp_batch_rewards = rewards
+
+        # Have not implemented with_MP because it didn't seem to offer any advantage.
+        # batch, pre_comp_batch_rewards = zip(*run_sims_MP(trainer=self, seeds=seeds))
+
+        num_events = [df.event_id.nunique() for df in batch]
+        num_our_events = [RU.num_tweets_of(df, sim_opts=trainer.sim_opts)
+                          for df in batch]
+
+        f_d = trainer.get_feed_dict(
+            batch,
+            pre_comp_batch_rewards=pre_comp_batch_rewards,
+            batch_end_times=batch_end_times,
+            batch_sim_opts=batch_sim_opts,
+            algo_ranks=batch_algo_ranks
+        )
+
+        if with_summaries:
+            reward, LL, loss, grad_norm, summaries, step, lr, _ = \
+                trainer.sess.run([trainer.tf_batch_rewards, LL_op, loss_op,
+                                  grad_norm_op, trainer.tf_merged_summaries,
+                                  trainer.global_step, trainer.tf_learning_rate,
+                                  train_op],
+                                 feed_dict=f_d)
+            train_writer.add_summary(summaries, step)
+        else:
+            reward, LL, loss, grad_norm, step, lr, _ = \
+                trainer.sess.run([trainer.tf_batch_rewards, LL_op, loss_op,
+                                  grad_norm_op, trainer.global_step,
+                                  trainer.tf_learning_rate, train_op],
+                                 feed_dict=f_d)
+        mean_LL = np.mean(LL)
+        mean_loss = np.mean(loss)
+        mean_reward = np.mean(reward)
+
+        print('{} Run {}, LL {:.5f}, loss {:.5f}, Rwd {:.5f}'
+              ', CTG {:.5f}, seeds {}--{}, grad_norm {:.5f}, step = {}'
+              ', lr = {:.5f}, events = {:.2f}/{:.2f}'
+              .format(_now(), epoch, mean_LL, mean_loss,
+                      mean_reward, mean_reward + mean_loss,
+                      seed_start, seed_end - 1, grad_norm, step, lr,
+                      np.mean(num_our_events), np.mean(num_events)))
+
+        # Ready for the next epoch.
+        seed_start = seed_end
+
+    chkpt_file = os.path.join(trainer.save_dir, 'tpprl.ckpt')
+    trainer.saver.save(trainer.sess, chkpt_file, global_step=trainer.global_step,)
+
+
+def get_real_data_eval_algo(
+    trainer, one_user_data, seeds, algo_feed_args, N, with_df=False,
+    reward_time_steps=1000, with_approx_rewards=True
+):
+    seeds = list(seeds)
+    seed_start = seeds[0]
+
+    rl_b_args = get_rl_b_args_from(trainer)
+    rl_b_args['algo_feed'] = True
+    rl_b_args['algo_feed_args'] = algo_feed_args
+
+    batch_df, rewards, batch_algo_ranks, batch_events, batch_sim_opts = [], [], [], [], []
+    for batch_idx in range(trainer.batch_size):
+        sim_opt_seed = seed_start + batch_idx * 9
+        mgr_seed = seed_start * 91 + batch_idx
+        window_start, batch_sim_opt = make_real_data_batch_sim_opts(
+            one_user_data,
+            N=N,
+            is_test=True,
+            seed=sim_opt_seed
+        )
+        batch_sim_opts.append(batch_sim_opt)
+        rl_b_args['t_min'] = window_start
+
+        exp_b = ExpRecurrentBroadcasterMP(_opts=Deco.Options(**rl_b_args),
+                                          seed=mgr_seed * 3)
+        mgr = batch_sim_opt.create_manager_with_broadcaster(exp_b)
+        mgr.run_dynamic()
+        batch_df.append(mgr.get_state().get_dataframe())
+
+        algo_ranks = np.asarray(exp_b.algo_ranks)
+        batch_algo_ranks.append(algo_ranks)
+        batch_events.append(exp_b.state.events)
+
+        end_time = batch_sim_opt.end_time
+        last_event_time = exp_b.state.events[-1].cur_time
+        survival_time = end_time - last_event_time
+        r_dt = np.asarray([ev.time_delta for ev in exp_b.state.events] +
+                          [survival_time])
+
+        if trainer.reward_kind == R_2_REWARD:
+            if with_approx_rewards:
+                reward = ((algo_ranks ** 2).mean(1) * r_dt[1:]).sum()
+            else:
+                times, ranks = algo_true_rank(
+                    sink_ids=batch_sim_opt.sink_ids,
+                    src_id=batch_sim_opt.src_id,
+                    events=exp_b.state.events,
+                    start_time=window_start,
+                    end_time=batch_sim_opt.end_time,
+                    steps=reward_time_steps,
+                    all_prefs=algo_feed_args,
+                    square=True,
+                )
+                dt = (times[1] - times[0])
+                reward = np.sum(ranks) * dt
+        elif trainer.reward_kind == TOP_K_REWARD:
+            if with_approx_rewards:
+                reward = -(np.where(algo_ranks < trainer.reward_top_k, 1.0, 0.0).mean(1) * r_dt[1:]).sum() + r_dt[0]
+            else:
+                times, top_ks = algo_top_k(
+                    sink_ids=batch_sim_opt.sink_ids,
+                    src_id=batch_sim_opt.src_id,
+                    events=exp_b.state.events,
+                    start_time=window_start,
+                    end_time=batch_sim_opt.end_time,
+                    steps=reward_time_steps,
+                    all_prefs=algo_feed_args,
+                    K=trainer.reward_top_k,
+                )
+                dt = (times[1] - times[0])
+                reward = np.sum(top_ks) * dt
+        else:
+            raise RuntimeError('Unknown reward: {}'.format(trainer.reward_kind))
+
+        rewards.append(reward)
+
+    t_min, t_max = window_start, batch_sim_opts[0].end_time
+
+    # batch_end_times = [x.end_time for x in batch_sim_opts]
+    batch_end_times = None
+    pre_comp_batch_rewards = rewards
+
+    # Have not implemented with_MP because it didn't seem to offer any advantage.
+    # batch, pre_comp_batch_rewards = zip(*run_sims_MP(trainer=self, seeds=seeds))
+
+    num_events = [df.event_id.nunique() for df in batch_df]
+    num_own_events = [RU.num_tweets_of(df, sim_opts=trainer.sim_opts)
+                      for df in batch_df]
+
+    f_d = trainer.get_feed_dict(
+        batch_df,
+        pre_comp_batch_rewards=pre_comp_batch_rewards,
+        batch_end_times=batch_end_times,
+        algo_ranks=batch_algo_ranks,
+        batch_sim_opts=batch_sim_opts
+    )
+
+    h_states = trainer.sess.run(trainer.h_states, feed_dict=f_d)
+
+    times = np.arange(t_min, t_max, (t_max - t_min) / 5000)
+    u_data = trainer.calc_u(
+        h_states=h_states,
+        feed_dict=f_d,
+        batch_size=len(seeds),
+        times=times
+    )
+    u_data['rewards'] = f_d[trainer.tf_batch_rewards]
+    u_data['num_events'] = num_events
+    u_data['num_own_events'] = num_own_events
+
+    if with_df:
+        u_data['batch_df'] = batch_df
+        u_data['batch_events'] = batch_events
+
+    return u_data
