@@ -314,6 +314,7 @@ class ExpRecurrentBroadcasterMP(OM.Broadcaster):
                  algo_feed=False, algo_feed_args=None):
         super(ExpRecurrentBroadcasterMP, self).__init__(src_id, seed)
         self.sink_ids = sim_opts.sink_ids
+        self.end_time = sim_opts.end_time
         self.init = False
 
         # Used to create h_next
@@ -327,6 +328,8 @@ class ExpRecurrentBroadcasterMP(OM.Broadcaster):
         self.algo_feed = algo_feed
         self.algo_feed_args = algo_feed_args
         self.algo_ranks = []
+        self.c_is = []
+        self.time_deltas = []
 
         # Needed for the sampler
         self.params = Deco.Options(**{
@@ -339,6 +342,12 @@ class ExpRecurrentBroadcasterMP(OM.Broadcaster):
         self.exp_sampler = ExpCDFSampler(_opts=self.params,
                                          t_min=t_min,
                                          seed=seed + 1)
+
+    def get_all_c_is(self):
+        return self.c_is + [self.exp_sampler.c]
+
+    def get_all_time_deltas(self):
+        return self.time_deltas + [self.end_time - self.state.time]
 
     def update_hidden_state(self, src_id, time_delta):
         """Returns the hidden state after a post by src_id and time delta."""
@@ -383,6 +392,8 @@ class ExpRecurrentBroadcasterMP(OM.Broadcaster):
             # Currently, it is waiting.
             return self.exp_sampler.generate_sample() - self.last_self_event_time
         else:
+            self.c_is.append(self.exp_sampler.c)
+            self.time_deltas.append(event.time_delta)
             self.cur_h = self.update_hidden_state(event.src_id, event.time_delta)
             next_post_time = self.exp_sampler.register_event(
                 event.cur_time,

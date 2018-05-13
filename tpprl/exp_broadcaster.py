@@ -1326,7 +1326,7 @@ def get_real_data_mgr_tf(trainer, t_min, batch_sim_opt, seed):
     return mgr
 
 
-def get_real_data_mgr_chpt_np(rl_b_args, t_min, batch_sim_opt, seed):
+def get_real_data_mgr_chpt_np(rl_b_args, t_min, batch_sim_opt, seed, with_broadcaster=False):
     """Creates a manager for running experiments from data read from a checkpoint."""
     rl_b_opts = Deco.Options(**rl_b_args)
 
@@ -1337,7 +1337,11 @@ def get_real_data_mgr_chpt_np(rl_b_args, t_min, batch_sim_opt, seed):
     )
     mgr = batch_sim_opt.create_manager_with_broadcaster(exp_b)
     mgr.state.time = t_min
-    return mgr
+
+    if with_broadcaster:
+        return mgr, exp_b
+    else:
+        return mgr
 
 
 def get_real_data_mgr_np(trainer, t_min, batch_sim_opt, seed):

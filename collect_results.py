@@ -21,7 +21,6 @@ import tpprl.exp_broadcaster as EB
 import natsort
 
 
-
 # This ensures that cvxopt uses only one thread for computation.
 # Otherwise, the computation leaks onto other cores and causes multiple
 # context switches, slowing down the overall calculation.
@@ -69,6 +68,7 @@ def worker_user(params):
         'N': user_opt_dict['N'],
         'reward_kind': user_opt_dict['trainer_opts_dict']['reward_kind'],
         'for_epoch': for_epoch,
+        'num_batches': test_batches,
     }
 
     window_start, eval_sim_opts = EB.make_real_data_batch_sim_opts(
@@ -120,15 +120,22 @@ def worker_user(params):
 
     init_seed = 865
     rl_dfs = []
+    rl_u_2 = []
     for idx in range(test_batches):
-        mgr = EB.get_real_data_mgr_chpt_np(
+        mgr, exp_b = EB.get_real_data_mgr_chpt_np(
             rl_b_dict,
             t_min=window_start,
             batch_sim_opt=eval_sim_opts,
-            seed=init_seed + idx
+            seed=init_seed + idx,
+            with_broadcaster=True
         )
         mgr.run_dynamic(max_events=MAX_EVENTS)
         rl_dfs.append(mgr.get_state().get_dataframe())
+
+        # Calculating the u^2 loss
+        c_is = exp_b.get_all_c_is()
+        time_deltas = exp_b.get_all_time_deltas()
+        rl_u_2.append(exp_b.exp_sampler.calc_quad_loss(time_deltas, c_is))
 
     num_tweets = [RU.num_tweets_of(df, broadcaster_id=eval_sim_opts.src_id)
                   for df in rl_dfs]
@@ -136,6 +143,9 @@ def worker_user(params):
 
     ret['capacity'] = capacity_cap
     ret['capacity_std'] = capacity_std
+
+    ret['RL_u_2_mean'] = np.mean(rl_u_2)
+    ret['RL_u_2_std'] = np.std(rl_u_2)
 
     if not only_rl:
         # Figure out what 'q' to use for RQ to get the same number of tweets.
