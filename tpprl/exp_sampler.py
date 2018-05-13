@@ -284,7 +284,8 @@ class ExpRecurrentBroadcasterMP(OM.Broadcaster):
                              self.src_id, self.algo_feed_args)
                 for sink_id in self.sink_ids
             ])
-            self.algo_ranks.append(r_t)
+
+        self.algo_ranks.append(r_t)
 
         return np.tanh(
             self.Wm[self.src_embed_map[src_id], :][:, np.newaxis] +
