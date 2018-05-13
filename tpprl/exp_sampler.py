@@ -196,7 +196,7 @@ def make_prefs(sink_ids, src_ids, seed=42):
     }
 
 
-def algo_rank_of(past_events, sink_id, src_id, all_prefs, c=1.0):
+def algo_rank_of(past_events, sink_id, src_id, all_prefs, c=1.0, t=None):
     """Find the algorithm rank of src_id on the feed of sink_id."""
     rel_events = [(ev, all_prefs['src_id_map'][ev.src_id])
                   for ev in past_events if sink_id in ev.sink_ids]
@@ -204,7 +204,8 @@ def algo_rank_of(past_events, sink_id, src_id, all_prefs, c=1.0):
     if len(rel_events) == 0:
         return 0
 
-    t = past_events[-1].cur_time
+    if t is None:
+        t = past_events[-1].cur_time
 
     sink_idx = all_prefs['sink_id_map'][sink_id]
     sink_perf_vec = all_prefs['sink_prefs'][sink_idx]
@@ -222,6 +223,79 @@ def algo_rank_of(past_events, sink_id, src_id, all_prefs, c=1.0):
             return idx
 
     return len(importance)
+
+
+def algo_ranks_from_events(events, sink_ids, src_id, all_prefs, c=1.0):
+    """Calculates the algorithmic feed ranks from a set of events."""
+    algo_ranks = []
+    for idx in range(len(events)):
+        cur_ranks = [None] * len(sink_ids)
+        for sink_id in sink_ids:
+            sink_idx = all_prefs['sink_id_map'][sink_id]
+            cur_ranks[sink_idx] = algo_rank_of(events[0:idx],
+                                               sink_id=sink_id,
+                                               src_id=src_id,
+                                               all_prefs=all_prefs)
+        algo_ranks.append(cur_ranks)
+
+    return np.asarray(algo_ranks)
+
+
+def avg_algo_rank(past_events, algo_ranks, end_time):
+    """Calculate the heuristic average rank for a priority feed."""
+    survival_time = end_time - past_events[-1].cur_time
+    dt = np.asarray([ev.time_delta for ev in past_events[1:]] + [survival_time])
+    r_t = algo_ranks.mean(1)
+    return np.sum(r_t * dt)
+
+
+def algo_true_rank(sink_ids, src_id, events, start_time, end_time,
+                   steps, all_prefs, square=False, c=1.0):
+    """A more accurate calculation (but more expensive) of the average algorithm rank."""
+    t_delta = (end_time - start_time) / steps
+    times = np.arange(start_time, end_time, t_delta)
+    ranks = []
+    rank = 0
+    idx = 0
+
+    for t in times:
+        while idx + 1 < len(events) and events[idx + 1].cur_time < t:
+            idx += 1
+
+        rank = np.mean(
+            [algo_rank_of(past_events=events[:idx],
+                          sink_id=x,
+                          src_id=src_id,
+                          all_prefs=all_prefs,
+                          t=t,
+                          c=c) ** (1.0 if not square else 2.0)
+             for x in sink_ids]
+        )
+        ranks.append(rank)
+
+    return times, np.asarray(ranks)
+
+
+def algo_top_k(sink_ids, src_id, events, start_time, end_time, K,
+               steps, all_prefs, c=1.0):
+    """A more accurate calculation (but more expensive) of time spent in top-k."""
+    t_delta = (end_time - start_time) / steps
+    times = np.arange(start_time, end_time, t_delta)
+    top_ks = []
+    top_k = 0
+    idx = 0
+
+    for t in times:
+        while idx + 1 < len(events) and events[idx + 1].cur_time < t:
+            idx += 1
+
+        top_k = np.mean(
+            [1.0 if (algo_rank_of(past_events=events[:idx], sink_id=x, src_id=src_id, all_prefs=all_prefs, t=t, c=c)) < K else 0.0
+             for x in sink_ids]
+        )
+        top_ks.append(top_k)
+
+    return times, np.asarray(top_ks)
 
 
 class ExpRecurrentBroadcasterMP(OM.Broadcaster):
