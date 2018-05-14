@@ -235,7 +235,8 @@ def algo_ranks_from_events(events, sink_ids, src_id, all_prefs, c=1.0):
             cur_ranks[sink_idx] = algo_rank_of(events[0:idx],
                                                sink_id=sink_id,
                                                src_id=src_id,
-                                               all_prefs=all_prefs)
+                                               all_prefs=all_prefs,
+                                               c=c)
         algo_ranks.append(cur_ranks)
 
     return np.asarray(algo_ranks)
@@ -311,7 +312,7 @@ class ExpRecurrentBroadcasterMP(OM.Broadcaster):
     def __init__(self, src_id, seed, t_min,
                  Wm, Wh, Wr, Wt, Bh, sim_opts,
                  wt, vt, bt, init_h, src_embed_map,
-                 algo_feed=False, algo_feed_args=None):
+                 algo_feed=False, algo_feed_args=None, algo_c=1.0):
         super(ExpRecurrentBroadcasterMP, self).__init__(src_id, seed)
         self.sink_ids = sim_opts.sink_ids
         self.end_time = sim_opts.end_time
@@ -330,6 +331,7 @@ class ExpRecurrentBroadcasterMP(OM.Broadcaster):
         self.algo_ranks = []
         self.c_is = []
         self.time_deltas = []
+        self.algo_c = algo_c
 
         # Needed for the sampler
         self.params = Deco.Options(**{
@@ -363,8 +365,10 @@ class ExpRecurrentBroadcasterMP(OM.Broadcaster):
             )
         else:
             r_t = np.array([
-                algo_rank_of(self.state.events, sink_id,
-                             self.src_id, self.algo_feed_args)
+                algo_rank_of(self.state.events, sink_id=sink_id,
+                             src_id=self.src_id,
+                             all_prefs=self.algo_feed_args,
+                             c=self.algo_c)
                 for sink_id in self.sink_ids
             ])
 

@@ -1498,6 +1498,7 @@ def train_real_data_algo(
         rl_b_args = get_rl_b_args_from(trainer)
         rl_b_args['algo_feed'] = True
         rl_b_args['algo_feed_args'] = algo_feed_args
+        rl_b_args['algo_c'] = batch_c
 
         batch, batch_sim_opts, rewards, batch_algo_ranks = [], [], [], []
         for batch_idx in range(trainer.batch_size):
@@ -1620,15 +1621,16 @@ def train_real_data_algo(
 
 
 def get_real_data_eval_algo(
-    trainer, one_user_data, seeds, algo_feed_args, N, with_df=False,
-    reward_time_steps=1000, with_approx_rewards=True
+    trainer, one_user_data, algo_feed_args, N, with_df=False,
+    init_seed=190, reward_time_steps=1000, with_approx_rewards=True,
+    batch_c=0.5,
 ):
-    seeds = list(seeds)
-    seed_start = seeds[0]
+    seed_start = init_seed
 
     rl_b_args = get_rl_b_args_from(trainer)
     rl_b_args['algo_feed'] = True
     rl_b_args['algo_feed_args'] = algo_feed_args
+    rl_b_args['algo_c'] = batch_c
 
     batch_df, rewards, batch_algo_ranks, batch_events, batch_sim_opts = [], [], [], [], []
     for batch_idx in range(trainer.batch_size):
@@ -1646,6 +1648,7 @@ def get_real_data_eval_algo(
         exp_b = ExpRecurrentBroadcasterMP(_opts=Deco.Options(**rl_b_args),
                                           seed=mgr_seed * 3)
         mgr = batch_sim_opt.create_manager_with_broadcaster(exp_b)
+        mgr.state.time = window_start
         mgr.run_dynamic()
         batch_df.append(mgr.get_state().get_dataframe())
 
@@ -1672,6 +1675,7 @@ def get_real_data_eval_algo(
                     steps=reward_time_steps,
                     all_prefs=algo_feed_args,
                     square=True,
+                    c=batch_c,
                 )
                 dt = (times[1] - times[0])
                 reward = np.sum(ranks) * dt
@@ -1688,9 +1692,10 @@ def get_real_data_eval_algo(
                     steps=reward_time_steps,
                     all_prefs=algo_feed_args,
                     K=trainer.reward_top_k,
+                    c=batch_c,
                 )
                 dt = (times[1] - times[0])
-                reward = np.sum(top_ks) * dt
+                reward = -np.sum(top_ks) * dt
         else:
             raise RuntimeError('Unknown reward: {}'.format(trainer.reward_kind))
 
@@ -1698,8 +1703,7 @@ def get_real_data_eval_algo(
 
     t_min, t_max = window_start, batch_sim_opts[0].end_time
 
-    # batch_end_times = [x.end_time for x in batch_sim_opts]
-    batch_end_times = None
+    batch_end_times = [x.end_time for x in batch_sim_opts]
     pre_comp_batch_rewards = rewards
 
     # Have not implemented with_MP because it didn't seem to offer any advantage.
@@ -1719,12 +1723,14 @@ def get_real_data_eval_algo(
 
     h_states = trainer.sess.run(trainer.h_states, feed_dict=f_d)
 
+    batch_time_start = [df.t.min() for df in batch_df]
     times = np.arange(t_min, t_max, (t_max - t_min) / 5000)
     u_data = trainer.calc_u(
         h_states=h_states,
         feed_dict=f_d,
-        batch_size=len(seeds),
-        times=times
+        batch_size=trainer.batch_size,
+        times=times,
+        batch_time_start=batch_time_start,
     )
     u_data['rewards'] = f_d[trainer.tf_batch_rewards]
     u_data['num_events'] = num_events
