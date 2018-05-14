@@ -112,27 +112,27 @@ def run(all_user_data_file, user_idx, output_dir, q, N, gpu, reward_kind, K, sho
     algo_feed_seed = 42 + 1
     algo_feed_args = ES.make_prefs(sink_ids, src_ids, seed=algo_feed_seed)
 
-    user_opts_dict = {}
-    user_opts_dict['trainer_opts_dict'] = trainer_opts._get_dict()
-    user_opts_dict['num_other_broadcasters'] = len(trainer.sim_opts.other_sources)
-    user_opts_dict['hidden_dims'] = trainer.num_hidden_states
-    user_opts_dict['num_followers'] = len(trainer.sim_opts.sink_ids)
-    user_opts_dict['seed'] = trainer_opts_seed
+    user_opt_dict = {}
+    user_opt_dict['trainer_opts_dict'] = trainer_opts._get_dict()
+    user_opt_dict['num_other_broadcasters'] = len(trainer.sim_opts.other_sources)
+    user_opt_dict['hidden_dims'] = trainer.num_hidden_states
+    user_opt_dict['num_followers'] = len(trainer.sim_opts.sink_ids)
+    user_opt_dict['seed'] = trainer_opts_seed
 
-    user_opts_dict['algo_feed'] = algo_feed
-    user_opts_dict['algo_feed_seed'] = algo_feed_seed
-    user_opts_dict['algo_feed_args'] = algo_feed_args
-    user_opts_dict['algo_c'] = algo_c
-    user_opts_dict['algo_with_approx_rewards'] = with_approx_rewards
-    user_opts_dict['algo_reward_time_steps'] = reward_time_steps
+    user_opt_dict['algo_feed'] = algo_feed
+    user_opt_dict['algo_feed_seed'] = algo_feed_seed
+    user_opt_dict['algo_feed_args'] = algo_feed_args
+    user_opt_dict['algo_c'] = algo_c
+    user_opt_dict['algo_with_approx_rewards'] = with_approx_rewards
+    user_opt_dict['algo_reward_time_steps'] = reward_time_steps
 
     # Needed for experiments later
-    user_opts_dict['N'] = N
-    user_opts_dict['q'] = q
+    user_opt_dict['N'] = N
+    user_opt_dict['q'] = q
 
     os.makedirs(trainer.save_dir, exist_ok=True)
     with open(os.path.join(trainer.save_dir, 'user_opt_dict.dill'), 'wb') as f:
-        dill.dump(user_opts_dict, f)
+        dill.dump(user_opt_dict, f)
 
     trainer.initialize(finalize=True)
 
