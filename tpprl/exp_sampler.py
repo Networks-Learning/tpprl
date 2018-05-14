@@ -3,6 +3,8 @@ compatible broadcasters (both single-threaded and multi-threaded versions)."""
 import decorated_options as Deco
 import numpy as np
 import redqueen.opt_model as OM
+import redqueen.utils as RU
+import multiprocessing as MP
 
 
 class CDFSampler:
@@ -215,10 +217,11 @@ def algo_rank_of(past_events, sink_id, src_id, all_prefs, c=1.0, t=None):
         [(np.exp(c * (t - ev.cur_time) * (np.dot(sink_perf_vec, src_prefs[src_idx]) - 1)),
           ev.src_id)
          for ev, src_idx in rel_events],
-        reverse=True
+        key=lambda x: x[0]
     )
+    # print(importance)
 
-    for idx, (_, ev_src_id) in enumerate(importance):
+    for idx, (_, ev_src_id) in enumerate(importance[::-1]):
         if src_id == ev_src_id:
             return idx
 
@@ -272,6 +275,9 @@ def algo_true_rank(sink_ids, src_id, events, start_time, end_time,
                           c=c) ** (1.0 if not square else 2.0)
              for x in sink_ids]
         )
+        # if idx > 1:
+        #     print(t, events[:idx][-1].cur_time, rank)
+
         ranks.append(rank)
 
     return times, np.asarray(ranks)
@@ -291,7 +297,12 @@ def algo_top_k(sink_ids, src_id, events, start_time, end_time, K,
             idx += 1
 
         top_k = np.mean(
-            [1.0 if (algo_rank_of(past_events=events[:idx], sink_id=x, src_id=src_id, all_prefs=all_prefs, t=t, c=c)) < K else 0.0
+            [1.0 if (algo_rank_of(past_events=events[:idx],
+                                  sink_id=x,
+                                  src_id=src_id,
+                                  all_prefs=all_prefs,
+                                  t=t,
+                                  c=c)) < K else 0.0
              for x in sink_ids]
         )
         top_ks.append(top_k)
@@ -492,3 +503,198 @@ class ExpRecurrentBroadcaster(OM.Broadcaster):
 
 
 OM.SimOpts.registerSource('ExpRecurrentBroadcaster', ExpRecurrentBroadcaster)
+
+
+class OptAlgo(OM.Broadcaster):
+    """This is the RedQueen broadcaster with the ranks being provided from
+    the algorithmic feeds instead of working from the true ranks.
+
+    This will be used as a heuristic to compare the performance of RL algo to.
+    """
+
+    def __init__(self, src_id, seed, algo_feed_args, q=1.0, s=1.0, algo_c=0.5):
+        super(OptAlgo, self).__init__(src_id, seed)
+        self.q = q
+        self.s = s
+        self.algo_c = algo_c
+        self.sqrt_s_by_q = None
+        self.old_rate = 0
+        self.init = False
+        self.algo_feed_args = algo_feed_args
+
+    def get_next_interval(self, event):
+        if not self.init:
+            self.init = True
+            self.state.set_track_src_id(self.src_id, self.sink_ids)
+
+            if isinstance(self.s, dict):
+                self.s_vec = np.asarray([self.s[x]
+                                         for x in sorted(self.sink_ids)])
+            else:
+                # Assuming that the self.q is otherwise a scalar number.
+                # Or a vector with the same number of elements as sink_ids
+                self.s_vec = np.ones(len(self.sink_ids), dtype=float) * self.s
+
+            self.sqrt_s_by_q = np.sqrt(self.s_vec / self.q)
+
+        self.state.apply_event(event)
+
+        if event is None:
+            # Tweet immediately if this is the first event.
+            self.old_rate = 0
+            return 0
+        elif event.src_id == self.src_id:
+            # No need to tweet if we are on top of all walls
+            self.old_rate = 0
+            return np.inf
+        else:
+            # check status of all walls and find position in it.
+            # r_t = self.state.get_wall_rank(self.src_id, self.sink_ids,
+            #                                dict_form=False)
+
+            r_t = np.array([
+                algo_rank_of(self.state.events, sink_id=sink_id,
+                             src_id=self.src_id,
+                             all_prefs=self.algo_feed_args,
+                             c=self.algo_c)
+                for sink_id in self.sink_ids
+            ])
+
+            # TODO: If multiple walls are updated at the same time, should the
+            # drawing happen only once after all the updates have been applied
+            # or one at a time? Does that make a difference? Probably not. A
+            # lot more work if the events are sent one by one per wall, though.
+            new_rate = self.sqrt_s_by_q.dot(r_t)
+            diff_rate = new_rate - self.old_rate
+            self.old_rate = new_rate
+
+            # TODO: If the rank has fallen, then do not re-sample.
+            if diff_rate > 0:
+                t_delta_new = self.random_state.exponential(scale=1.0 / diff_rate)
+                cur_time = event.cur_time
+
+                if self.last_self_event_time + self.t_delta > cur_time + t_delta_new:
+                    return cur_time + t_delta_new - self.last_self_event_time
+
+
+def calc_q_capacity_iter_algo(sim_opts, q, algo_c, algo_feed_args,
+                              seeds=None, max_events=None, t_min=0):
+    if seeds is None:
+        seeds = range(10)
+
+    sim_opts = sim_opts.update({'q': q})
+
+    capacities = np.zeros(len(seeds), dtype=float)
+    for idx, seed in enumerate(seeds):
+        opt_algo = OptAlgo(src_id=sim_opts.src_id, seed=100 + seed,
+                           algo_feed_args=algo_feed_args, algo_c=algo_c, q=q)
+        m = sim_opts.create_manager_with_broadcaster(opt_algo)
+        m.state.time = t_min
+        m.run_dynamic(max_events=max_events)
+        capacities[idx] = RU.num_tweets_of(m.get_state().get_dataframe(),
+                                           broadcaster_id=sim_opts.src_id)
+
+    return capacities
+
+
+def sweep_q_algo(sim_opts, capacity_cap, algo_feed_args, algo_c, tol=1e-2,
+                 verbose=False, q_init=1000.0, max_events=None,
+                 max_iters=float('inf'), t_min=0, only_tol=False):
+    # We know that on average, the ∫u(t)dt decreases with increasing 'q'
+
+    def terminate_cond(new_capacity):
+        return abs(new_capacity - capacity_cap) / capacity_cap < tol or \
+            (not only_tol and np.ceil(capacity_cap - 1) <= new_capacity <= np.ceil(capacity_cap + 1))
+
+    # if q_init is None:
+    #     wall_mgr = sim_opts.create_manager_for_wall()
+    #     wall_mgr.run_dynamic()
+    #     r_t = rank_of_src_in_df(wall_mgr.state.get_dataframe(), -1)
+    #     q_init = (4 * (r_t.iloc[-1].mean() ** 2) * (sim_opts.end_time) ** 2) / (np.pi * np.pi * (capacity_cap + 1) ** 4)
+    #     if verbose:
+    #         logTime('q_init = {}'.format(q_init))
+
+    # Step 1: Find the upper/lower bound by exponential increase/decrease
+    init_cap = calc_q_capacity_iter_algo(
+        sim_opts=sim_opts, q=q_init, algo_feed_args=algo_feed_args,
+        algo_c=algo_c, max_events=max_events, t_min=t_min
+    ).mean()
+
+    if verbose:
+        RU.logTime('Initial capacity = {}, target capacity = {}, q_init = {}'
+                   .format(init_cap, capacity_cap, q_init))
+
+    if terminate_cond(init_cap):
+        return q_init
+
+    q = q_init
+    if init_cap < capacity_cap:
+        iters = 0
+        while True:
+            iters += 1
+            q_hi = q
+            q /= 2.0
+            q_lo = q
+            capacity = calc_q_capacity_iter_algo(
+                sim_opts=sim_opts, q=q, algo_feed_args=algo_feed_args,
+                algo_c=algo_c, max_events=max_events, t_min=t_min
+            ).mean()
+            if verbose:
+                RU.logTime('q = {}, capacity = {}'.format(q, capacity))
+            if terminate_cond(capacity):
+                return q
+            if capacity >= capacity_cap:
+                break
+            if iters > max_iters:
+                if verbose:
+                    RU.logTime('Breaking because of max-iters: {}.'.format(max_iters))
+                return q
+    else:
+        iters = 0
+        while True:
+            iters += 1
+            q_lo = q
+            q *= 2.0
+            q_hi = q
+            capacity = calc_q_capacity_iter_algo(
+                sim_opts=sim_opts, q=q, algo_feed_args=algo_feed_args,
+                algo_c=algo_c, max_events=max_events, t_min=t_min
+            ).mean()
+
+            if verbose:
+                RU.logTime('q = {}, capacity = {}'.format(q, capacity))
+            # TODO: will break if capacity_cap is too low ~ 1 event.
+            if terminate_cond(capacity):
+                return q
+            if capacity <= capacity_cap:
+                break
+            if iters > max_iters:
+                if verbose:
+                    RU.logTime('Breaking because of max-iters: {}.'.format(max_iters))
+                return q
+
+    if verbose:
+        RU.logTime('q_hi = {}, q_lo = {}'.format(q_hi, q_lo))
+
+    # Step 2: Keep bisecting on 's' until we arrive at a close enough solution.
+    while True:
+        q = (q_hi + q_lo) / 2.0
+        new_capacity = calc_q_capacity_iter_algo(
+            sim_opts=sim_opts, q=q, algo_feed_args=algo_feed_args,
+            algo_c=algo_c, max_events=max_events, t_min=t_min
+        ).mean()
+
+        if verbose:
+            RU.logTime('new_capacity = {}, q = {}'.format(new_capacity, q))
+
+        if terminate_cond(new_capacity):
+            # Have converged
+            break
+        elif new_capacity > capacity_cap:
+            q_lo = q
+        else:
+            q_hi = q
+
+    # Step 3: Return
+    return q
+
