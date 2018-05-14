@@ -193,7 +193,7 @@ def mk_def_exp_recurrent_trainer_opts(num_other_broadcasters, hidden_dims,
         reward_kind=R_2_REWARD,
 
         # May need a better way of passing reward_fn arguments
-        reward_top_k=-1,
+        reward_top_k=1,
         reward_episode_target=-1,
         reward_target_weight=0,
 
@@ -1549,7 +1549,7 @@ def train_real_data_algo(
                     reward = np.sum(ranks) * dt
             elif trainer.reward_kind == TOP_K_REWARD:
                 if with_approx_rewards:
-                    reward = -(np.where(algo_ranks < trainer.reward_top_k, 1.0, 0.0).mean(1) * r_dt[1:]).sum() + r_dt[0]
+                    reward = -(np.where(algo_ranks < trainer.reward_top_k, 1.0, 0.0).mean(1) * r_dt[1:]).sum() - r_dt[0]
                 else:
                     times, top_ks = algo_top_k(
                         sink_ids=batch_sim_opt.sink_ids,
@@ -1681,7 +1681,7 @@ def get_real_data_eval_algo(
                 reward = np.sum(ranks) * dt
         elif trainer.reward_kind == TOP_K_REWARD:
             if with_approx_rewards:
-                reward = -(np.where(algo_ranks < trainer.reward_top_k, 1.0, 0.0).mean(1) * r_dt[1:]).sum() + r_dt[0]
+                reward = -(np.where(algo_ranks < trainer.reward_top_k, 1.0, 0.0).mean(1) * r_dt[1:]).sum() - r_dt[0]
             else:
                 times, top_ks = algo_top_k(
                     sink_ids=batch_sim_opt.sink_ids,
