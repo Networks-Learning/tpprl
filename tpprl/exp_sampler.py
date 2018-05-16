@@ -5,6 +5,7 @@ import numpy as np
 import redqueen.opt_model as OM
 import redqueen.utils as RU
 import multiprocessing as MP
+from collections import defaultdict
 
 
 class CDFSampler:
@@ -185,7 +186,7 @@ def gen_rand_vecs(dims, number, random_state):
                        [random_state.standard_normal(dims) for _ in range(number)]])
 
 
-def make_prefs(sink_ids, src_ids, seed=42):
+def make_prefs(sink_ids, src_ids, src_lifetime_dict, seed=42):
     RS = np.random.RandomState(seed=seed)
     sink_prefs = gen_rand_vecs(2, len(sink_ids), RS)
     src_prefs = gen_rand_vecs(2, len(src_ids), RS)
@@ -194,38 +195,62 @@ def make_prefs(sink_ids, src_ids, seed=42):
         'src_id_map': dict([(x, idx) for idx, x in enumerate(src_ids)]),
         'sink_prefs': sink_prefs,
         'src_prefs': src_prefs,
-        'seed': seed
+        'seed': seed,
+        'lifetime': src_lifetime_dict
     }
 
 
 def algo_rank_of(past_events, sink_id, src_id, all_prefs, c=1.0, t=None):
     """Find the algorithm rank of src_id on the feed of sink_id."""
-    rel_events = [(ev, all_prefs['src_id_map'][ev.src_id])
-                  for ev in past_events if sink_id in ev.sink_ids]
 
-    if len(rel_events) == 0:
+    if len(past_events) == 0:
         return 0
 
     if t is None:
         t = past_events[-1].cur_time
 
+    lifetime = all_prefs['lifetime']
     sink_idx = all_prefs['sink_id_map'][sink_id]
-    sink_perf_vec = all_prefs['sink_prefs'][sink_idx]
+    sink_pref_vec = all_prefs['sink_prefs'][sink_idx]
     src_prefs = all_prefs['src_prefs']
 
-    importance = sorted(
-        [(np.exp(c * (t - ev.cur_time) * (np.dot(sink_perf_vec, src_prefs[src_idx]) - 1)),
-          ev.src_id)
-         for ev, src_idx in rel_events],
-        key=lambda x: x[0]
-    )
-    # print(importance)
+    src_importance = {src_id: np.dot(sink_pref_vec, src_prefs[all_prefs['src_id_map'][src_id]])
+                      for src_id in all_prefs['src_id_map'].keys()}
 
-    for idx, (_, ev_src_id) in enumerate(importance[::-1]):
+    feed = sorted(
+        [(src_importance[ev.src_id] if (t - ev.cur_time) < lifetime[ev.src_id] else -100000,
+          ev.cur_time,
+          ev.src_id)
+         for ev in past_events if sink_id in ev.sink_ids],
+        key=lambda x: (x[0], x[1])
+    )
+
+    # print(feed)
+
+    for idx, (_, _, ev_src_id) in enumerate(feed[::-1]):
         if src_id == ev_src_id:
             return idx
 
-    return len(importance)
+    # If our broadcaster is not present in there, then just assume he is at
+    # the bottom.
+    return len(feed)
+
+# Old implementation:
+    # importance = sorted(
+    #     [(np.exp(c * (t - ev.cur_time) * (np.dot(sink_perf_vec, src_prefs[src_idx]) - 1)),
+    #       ev.src_id)
+    #      for ev, src_idx in rel_events],
+    #     key=lambda x: x[0]
+    # )
+
+    # Though Python's sorted is stable, the behavior is unclear if reverse=True
+    # importance = sorted(
+    #     [(np.dot(sink_perf_vec, src_prefs[src_idx]), ev.src_id)
+    #      for ev, src_idx in rel_events],
+    #     key=lambda x: x[0]
+    # )
+
+    # print(importance)
 
 
 def algo_ranks_from_events(events, sink_ids, src_id, all_prefs, c=1.0):
@@ -283,6 +308,22 @@ def algo_true_rank(sink_ids, src_id, events, start_time, end_time,
     return times, np.asarray(ranks)
 
 
+def algo_true_rank_avg_reward(sink_ids, src_id, events, start_time, end_time,
+                              steps, all_prefs, c=1.0, square=False):
+    times, rank = algo_true_rank(
+        sink_ids=sink_ids,
+        src_id=src_id,
+        events=events,
+        start_time=start_time,
+        end_time=end_time,
+        steps=steps,
+        all_prefs=all_prefs,
+        square=square,
+        c=1.0,
+    )
+    return np.sum(rank) * (times[1] - times[0])
+
+
 def algo_top_k(sink_ids, src_id, events, start_time, end_time, K,
                steps, all_prefs, c=1.0):
     """A more accurate calculation (but more expensive) of time spent in top-k."""
@@ -308,6 +349,20 @@ def algo_top_k(sink_ids, src_id, events, start_time, end_time, K,
         top_ks.append(top_k)
 
     return times, np.asarray(top_ks)
+
+
+def algo_top_k_reward(sink_ids, src_id, events, start_time, end_time, K,
+                      steps, all_prefs, c=1.0):
+    times, top_ks = algo_top_k(sink_ids=sink_ids,
+                               src_id=src_id,
+                               events=events,
+                               start_time=start_time,
+                               end_time=end_time,
+                               K=K,
+                               steps=steps,
+                               all_prefs=all_prefs,
+                               c=1.0)
+    return np.sum(top_ks) * (times[1] - times[0])
 
 
 class ExpRecurrentBroadcasterMP(OM.Broadcaster):
@@ -568,13 +623,15 @@ class OptAlgo(OM.Broadcaster):
             diff_rate = new_rate - self.old_rate
             self.old_rate = new_rate
 
-            # TODO: If the rank has fallen, then do not re-sample.
             if diff_rate > 0:
                 t_delta_new = self.random_state.exponential(scale=1.0 / diff_rate)
                 cur_time = event.cur_time
 
                 if self.last_self_event_time + self.t_delta > cur_time + t_delta_new:
                     return cur_time + t_delta_new - self.last_self_event_time
+            else:
+                # TODO: Rejection sampling here to reject events, akin to Curb.
+                pass
 
 
 def calc_q_capacity_iter_algo(sim_opts, q, algo_c, algo_feed_args,
