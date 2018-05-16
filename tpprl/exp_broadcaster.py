@@ -360,49 +360,49 @@ class ExpRecurrentTrainer:
                 #         self.tf_bt
                 #     )
 
-                assert with_dynamic_rnn, "The non-dynamic-RNN path has been removed."
+                # assert with_dynamic_rnn, "The non-dynamic-RNN path has been removed."
 
-                # Un-stacked version (for ease of debugging)
+                # # Un-stacked version (for ease of debugging)
 
-                with tf.name_scope('batched'):
-                    self.rnn_cell = TPPRExpCell(
-                        hidden_state_size=(None, self.num_hidden_states),
-                        output_size=[self.num_hidden_states] + [1] * 3,
-                        src_id=sim_opts.src_id,
-                        tf_dtype=self.tf_dtype,
-                        Wm=self.tf_Wm, Wr=self.tf_Wr, Wh=self.tf_Wh,
-                        Wt=self.tf_Wt, Bh=self.tf_Bh,
-                        wt=self.tf_wt, vt=self.tf_vt, bt=self.tf_bt
-                    )
+                # with tf.name_scope('batched'):
+                #     self.rnn_cell = TPPRExpCell(
+                #         hidden_state_size=(None, self.num_hidden_states),
+                #         output_size=[self.num_hidden_states] + [1] * 3,
+                #         src_id=sim_opts.src_id,
+                #         tf_dtype=self.tf_dtype,
+                #         Wm=self.tf_Wm, Wr=self.tf_Wr, Wh=self.tf_Wh,
+                #         Wt=self.tf_Wt, Bh=self.tf_Bh,
+                #         wt=self.tf_wt, vt=self.tf_vt, bt=self.tf_bt
+                #     )
 
-                    ((self.h_states, LL_log_terms, LL_int_terms, loss_terms), tf_batch_h_t) = tf.nn.dynamic_rnn(
-                        self.rnn_cell,
-                        inputs=(tf.expand_dims(self.tf_batch_b_idxes, axis=-1),
-                                self.tf_batch_ranks,
-                                tf.expand_dims(self.tf_batch_t_deltas, axis=-1)),
-                        sequence_length=tf.squeeze(self.tf_batch_seq_len, axis=-1),
-                        dtype=self.tf_dtype,
-                        initial_state=self.tf_batch_init_h
-                    )
-                    self.LL_log_terms = tf.squeeze(LL_log_terms, axis=-1)
-                    self.LL_int_terms = tf.squeeze(LL_int_terms, axis=-1)
-                    self.loss_terms = tf.squeeze(loss_terms, axis=-1)
+                #     ((self.h_states, LL_log_terms, LL_int_terms, loss_terms), tf_batch_h_t) = tf.nn.dynamic_rnn(
+                #         self.rnn_cell,
+                #         inputs=(tf.expand_dims(self.tf_batch_b_idxes, axis=-1),
+                #                 self.tf_batch_ranks,
+                #                 tf.expand_dims(self.tf_batch_t_deltas, axis=-1)),
+                #         sequence_length=tf.squeeze(self.tf_batch_seq_len, axis=-1),
+                #         dtype=self.tf_dtype,
+                #         initial_state=self.tf_batch_init_h
+                #     )
+                #     self.LL_log_terms = tf.squeeze(LL_log_terms, axis=-1)
+                #     self.LL_int_terms = tf.squeeze(LL_int_terms, axis=-1)
+                #     self.loss_terms = tf.squeeze(loss_terms, axis=-1)
 
-                    # Survival terms for LL and loss.
-                    # self.LL_last = -(1 / self.tf_wt) * tf.squeeze(
-                    #     batch_u_theta(self.tf_batch_last_interval) - batch_u_theta(t_0)
-                    # )
+                #     # Survival terms for LL and loss.
+                #     # self.LL_last = -(1 / self.tf_wt) * tf.squeeze(
+                #     #     batch_u_theta(self.tf_batch_last_interval) - batch_u_theta(t_0)
+                #     # )
 
-                    # self.loss_last = (1 / (2 * self.tf_wt)) * tf.squeeze(
-                    #     tf.square(batch_u_theta(self.tf_batch_last_interval)) -
-                    #     tf.square(batch_u_theta(t_0))
-                    # )
+                #     # self.loss_last = (1 / (2 * self.tf_wt)) * tf.squeeze(
+                #     #     tf.square(batch_u_theta(self.tf_batch_last_interval)) -
+                #     #     tf.square(batch_u_theta(t_0))
+                #     # )
 
-                    self.LL_last = self.rnn_cell.last_LL(tf_batch_h_t, self.tf_batch_last_interval)
-                    self.loss_last = self.rnn_cell.last_loss(tf_batch_h_t, self.tf_batch_last_interval)
+                #     self.LL_last = self.rnn_cell.last_LL(tf_batch_h_t, self.tf_batch_last_interval)
+                #     self.loss_last = self.rnn_cell.last_loss(tf_batch_h_t, self.tf_batch_last_interval)
 
-                    self.LL = tf.reduce_sum(self.LL_log_terms, axis=1) - tf.reduce_sum(self.LL_int_terms, axis=1) + self.LL_last
-                    self.loss = (self.q / 2) * (tf.reduce_sum(self.loss_terms, axis=1) + self.loss_last) * tf.pow(tf.cast(self.global_step, self.tf_dtype), self.decay_q_rate)
+                #     self.LL = tf.reduce_sum(self.LL_log_terms, axis=1) - tf.reduce_sum(self.LL_int_terms, axis=1) + self.LL_last
+                #     self.loss = (self.q / 2) * (tf.reduce_sum(self.loss_terms, axis=1) + self.loss_last) * tf.pow(tf.cast(self.global_step, self.tf_dtype), self.decay_q_rate)
 
                 # Stacked version (for performance)
 
@@ -518,7 +518,6 @@ class ExpRecurrentTrainer:
                         self.LL_stack = (tf.reduce_sum(self.LL_log_terms_stack, axis=1) - tf.reduce_sum(self.LL_int_terms_stack, axis=1)) + self.LL_last_term_stack
                         self.loss_stack = (self.q / 2) * (tf.reduce_sum(self.loss_terms_stack, axis=1) + self.loss_last_term_stack) * tf.pow(tf.cast(self.global_step, self.tf_dtype), self.decay_q_rate)
 
-
             with tf.name_scope('calc_u'):
                 with tf.device(var_device):
                     # These are operations needed to calculate u(t) in post-processing.
@@ -561,36 +560,36 @@ class ExpRecurrentTrainer:
         self.all_mini_vars = [self.Wh_mini, self.Wm_mini, self.Wt_mini, self.Bh_mini,
                               self.Wr_mini, self.bt_mini, self.vt_mini, self.wt_mini]
 
-        with tf.name_scope('split_grad'):
-            with tf.device(var_device):
-                # The gradients are added over the batch if made into a single call.
-                self.LL_grads = {x: [tf.gradients(y, x)
-                                     for y in tf.split(self.LL, self.batch_size)]
-                                 for x in self.all_tf_vars}
-                self.loss_grads = {x: [tf.gradients(y, x)
-                                       for y in tf.split(self.loss, self.batch_size)]
-                                   for x in self.all_tf_vars}
+        # with tf.name_scope('split_grad'):
+        #     with tf.device(var_device):
+        #         # The gradients are added over the batch if made into a single call.
+        #         self.LL_grads = {x: [tf.gradients(y, x)
+        #                              for y in tf.split(self.LL, self.batch_size)]
+        #                          for x in self.all_tf_vars}
+        #         self.loss_grads = {x: [tf.gradients(y, x)
+        #                                for y in tf.split(self.loss, self.batch_size)]
+        #                            for x in self.all_tf_vars}
 
-                avg_reward = tf.reduce_mean(self.loss, axis=0) + tf.reduce_mean(self.tf_batch_rewards, axis=0) if with_advantage else 0.0
+        #         avg_reward = tf.reduce_mean(self.loss, axis=0) + tf.reduce_mean(self.tf_batch_rewards, axis=0) if with_advantage else 0.0
 
-                # Attempt to calculate the gradient within TensorFlow for the entire
-                # batch, without moving to the CPU.
-                self.tower_gradients = [
-                    [(((tf.gather(self.tf_batch_rewards, idx) + tf.gather(self.loss, idx) - avg_reward) * self.LL_grads[x][idx][0] +
-                       self.loss_grads[x][idx][0]),
-                      x) for x in self.all_tf_vars]
-                    for idx in range(self.batch_size)
-                ]
+        #         # Attempt to calculate the gradient within TensorFlow for the entire
+        #         # batch, without moving to the CPU.
+        #         self.tower_gradients = [
+        #             [(((tf.gather(self.tf_batch_rewards, idx) + tf.gather(self.loss, idx) - avg_reward) * self.LL_grads[x][idx][0] +
+        #                self.loss_grads[x][idx][0]),
+        #               x) for x in self.all_tf_vars]
+        #             for idx in range(self.batch_size)
+        #         ]
 
-                self.avg_gradient = average_gradients(self.tower_gradients)
-                self.clipped_avg_gradients, self.grad_norm = \
-                    tf.clip_by_global_norm([grad for grad, _ in self.avg_gradient],
-                                           clip_norm=self.clip_norm)
+        #         self.avg_gradient = average_gradients(self.tower_gradients)
+        #         self.clipped_avg_gradients, self.grad_norm = \
+        #             tf.clip_by_global_norm([grad for grad, _ in self.avg_gradient],
+        #                                    clip_norm=self.clip_norm)
 
-                self.clipped_avg_gradient = list(zip(
-                    self.clipped_avg_gradients,
-                    [var for _, var in self.avg_gradient]
-                ))
+        #         self.clipped_avg_gradient = list(zip(
+        #             self.clipped_avg_gradients,
+        #             [var for _, var in self.avg_gradient]
+        #         ))
 
         with tf.name_scope('stack_grad'):
             with tf.device(var_device):
@@ -661,10 +660,10 @@ class ExpRecurrentTrainer:
 
         self.opt = tf.train.AdamOptimizer(learning_rate=self.tf_learning_rate,
                                           beta1=momentum)
-        self.sgd_op = self.opt.apply_gradients(self.avg_gradient,
-                                               global_step=self.global_step)
-        self.sgd_clipped_op = self.opt.apply_gradients(self.clipped_avg_gradient,
-                                                       global_step=self.global_step)
+        # self.sgd_op = self.opt.apply_gradients(self.avg_gradient,
+        #                                        global_step=self.global_step)
+        # self.sgd_clipped_op = self.opt.apply_gradients(self.clipped_avg_gradient,
+        #                                                global_step=self.global_step)
         self.sgd_stacked_op = self.opt.apply_gradients(self.clipped_avg_gradient_stack,
                                                        global_step=self.global_step)
 
@@ -1741,3 +1740,5 @@ def get_real_data_eval_algo(
         u_data['batch_events'] = batch_events
 
     return u_data
+
+
