@@ -362,30 +362,42 @@ class TPPRExpMarkedCellStacked(tf.contrib.rnn.RNNCell):
         t_0 = tf.zeros(name='zero_time', shape=(inf_batch_size, 1), dtype=self.tf_dtype)
         u_theta_0 = self.u_theta(h_prev, t_0, name='u_theta_0')
 
-        v_theta = tf.reshape(
-            tf.nn.softmax(
-                tf.einsum('aij,ai->aj', self.tf_Vy, h_prev),
-                axis=1,
-            ),
-            shape=[-1],
-            name='v_theta'
+        # Calculating entropy of the categorical distribution.
+        v_logits = tf.einsum('aij,ai->aj', self.tf_Vy, h_prev, name='v_logits')
+        v_logexpsum = tf.reduce_logsumexp(v_logits, axis=1, keepdims=True, name='v_logexpsum')
+        v_probs = tf.nn.softmax(v_logits, axis=1, name='v_probs')
+
+        v_entropy = tf.reduce_sum(
+            tf.multiply(-v_probs, v_logits - v_logexpsum),
+            axis=1,
+            keepdims=True,
+            name='v_entropy'
         )
 
+        v_unrolled = tf.reshape(
+            v_probs,
+            shape=[-1],
+            name='v_unrolled'
+        )
+        # print('v_logits', v_logits)
+        # print('v_logexpsum', v_logexpsum)
+        # print('v_probs', v_probs)
+        # print('v_entropy', v_entropy)
+
+        # LL calculation
         LL_log = (
             tf.squeeze(tf.log(u_theta), axis=-1) +
-            tf.log(tf.gather(v_theta, b_idx + lookup_offset))
+            tf.log(tf.gather(v_unrolled, b_idx + lookup_offset))
         )
 
-        # print('LL_log = ', LL_log)
         LL_int = (u_theta - u_theta_0) / self.tf_wt
-        # print('LL_int = ', LL_int)
         loss = (tf.square(u_theta) - tf.square(u_theta_0)) / (2 * self.tf_wt)
-        # print('loss = ', loss)
 
         return ((h_next,
                  tf.expand_dims(LL_log, axis=-1, name='LL_log'),
                  LL_int,
-                 loss),
+                 loss,
+                 v_entropy),
                 h_next)
 
     def last_LL(self, last_h, last_interval):

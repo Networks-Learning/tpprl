@@ -3,6 +3,8 @@ import os
 import tensorflow as tf
 import decorated_options as Deco
 import warnings
+import multiprocessing as MP
+import redqueen.utils as RU
 
 SAVE_DIR = 'teacher-log'
 MAX_EVENTS = 100000
@@ -45,19 +47,28 @@ class Student:
         return recall
 
     def recall(self, item, t):
-        m_t = np.exp(-(self.ns[item] * (t - self.last_review_times[item])))
+        m_t = self.prob_recall(item, t)
         return self.RS.rand() < m_t
+
+    def prob_recall(self, item, t):
+        return np.exp(-(self.ns[item] * (t - self.last_review_times[item])))
+
+
+def mk_standard_student(scenario_opts, seed):
+    alphas = scenario_opts['alphas']
+    betas = scenario_opts['betas']
+    n_0s = np.ones_like(alphas)
+    return Student(n_0s, alphas, betas, seed)
 
 
 class Scenario:
-    def __init__(self, alphas, betas, seed,
+    def __init__(self, scenario_opts, seed,
                  Wm, Wh, Wr, Wt, Bh, Vy,
                  wt, vt, bt, init_h, T):
 
-        n_0s = np.ones_like(alphas)
-        self.num_items = n_0s.shape[0]
+        self.num_items = Vy.shape[1]
+        self.student = mk_standard_student(scenario_opts, seed=seed * 2)
 
-        self.student = Student(n_0s=n_0s, alphas=alphas, betas=betas, seed=seed * 2)
         self.Wm = Wm
         self.Wh = Wh
         self.Wr = Wr
@@ -76,15 +87,16 @@ class Scenario:
         self.time_deltas = []
         self.recalls = []
         self.items = []
+        self.item_probs = []
 
-        self.params = Deco.Options(**{
-            'wt': wt,
-            'vt': vt,
-            'bt': bt,
-            'init_h': init_h
-        })
+        # self.params = Deco.Options(**{
+        #     'wt': wt,
+        #     'vt': vt,
+        #     'bt': bt,
+        #     'init_h': init_h
+        # })
 
-        self.exp_sampler = ExpCDFSampler(_opts=self.params,
+        self.exp_sampler = ExpCDFSampler(wt=wt, vt=vt, bt=bt, init_h=init_h,
                                          t_min=0,
                                          seed=seed + 1)
 
@@ -109,6 +121,14 @@ class Scenario:
         assert self._init
         return len(self.c_is)
 
+    def get_item_probs(self):
+        assert self._init
+        return self.item_probs
+
+    def get_recalls(self):
+        assert self._init
+        return self.recalls
+
     def update_hidden_state(self, item, t, time_delta):
         """Returns the hidden state after a post by src_id and time delta."""
         recall = float(self.student.review(item, t))
@@ -122,9 +142,8 @@ class Scenario:
             self.Bh
         )
 
-    def generate_sample(self):
+    def generate_sample(self, p):
         t_next = self.exp_sampler.generate_sample()
-        p = softmax(self.Vy.T.dot(self.cur_h)).squeeze(axis=-1)
         item_next = self.RS.choice(np.arange(self.num_items), p=p)
         return (t_next, item_next)
 
@@ -138,7 +157,10 @@ class Scenario:
 
         idx = 0
         t = 0
-        (t_next, item_next) = self.generate_sample()
+
+        p = softmax(self.Vy.T.dot(self.cur_h)).squeeze(axis=-1)
+        self.item_probs.append(p)
+        (t_next, item_next) = self.generate_sample(p)
 
         while idx < max_events and t_next < self.T:
             idx += 1
@@ -154,7 +176,12 @@ class Scenario:
 
             self.cur_h = self.update_hidden_state(item_next, t, time_delta)
             self.exp_sampler.register_event(t, self.cur_h, own_event=True)
-            (t_next, item_next) = self.generate_sample()
+
+            p = softmax(self.Vy.T.dot(self.cur_h)).squeeze(axis=-1)
+            self.item_probs.append(p)
+            (t_next, item_next) = self.generate_sample(p)
+
+        return self
 
     def reward(self, tau):
         """Returns the result of a test conducted at T + tau."""
@@ -174,6 +201,7 @@ def mk_def_teacher_opts(hidden_dims, num_items,
         decay_rate=0.001,
         num_hidden_states=hidden_dims,
         learning_rate=.01,
+        learning_bump=1.0,
         clip_norm=1.0,
         tau=15.0,
 
@@ -181,7 +209,8 @@ def mk_def_teacher_opts(hidden_dims, num_items,
         Wm=RS.randn(num_items, hidden_dims),
         Wr=RS.randn(hidden_dims, 1),
         Wt=RS.randn(hidden_dims, 1),
-        Vy=RS.randn(hidden_dims, num_items),
+        # Vy=RS.randn(hidden_dims, num_items),
+        Vy=np.ones((hidden_dims, num_items)),  # Careful initialization
         Bh=RS.randn(hidden_dims, 1),
 
         vt=RS.randn(hidden_dims, 1),
@@ -195,7 +224,7 @@ def mk_def_teacher_opts(hidden_dims, num_items,
         momentum=0.9,
         max_events=5000,
         batch_size=16,
-        end_time=100.0,
+        T=100.0,
 
         device_cpu='/cpu:0',
         device_gpu='/gpu:0',
@@ -211,7 +240,8 @@ def mk_def_teacher_opts(hidden_dims, num_items,
         # Whether or not to use the advantage formulation.
         with_advantage=True,
 
-        q=0.001,
+        q=0.0005,
+        q_entropy=0.01,
 
         scenario_opts=scenario_opts,
     )
@@ -222,8 +252,8 @@ def mk_def_teacher_opts(hidden_dims, num_items,
 class ExpRecurrentTeacher:
     @Deco.optioned()
     def __init__(self, Vy, Wm, Wh, Wt, Wr, Bh, vt, wt, bt, num_hidden_states,
-                 sess, scope, batch_size, max_events, q,
-                 learning_rate, clip_norm, t_min, end_time,
+                 sess, scope, batch_size, max_events, q, q_entropy,
+                 learning_bump, learning_rate, clip_norm, t_min, T,
                  summary_dir, save_dir, decay_steps, decay_rate, momentum,
                  device_cpu, device_gpu, only_cpu, with_advantage,
                  num_items, decay_q_rate, scenario_opts, tau):
@@ -233,7 +263,8 @@ class ExpRecurrentTeacher:
         self.scenario_opts = scenario_opts
 
         self.t_min = 0
-        self.t_max = end_time
+        self.t_max = T
+        self.T = T
         self.tau = tau
 
         self.summary_dir = summary_dir
@@ -254,6 +285,7 @@ class ExpRecurrentTeacher:
         self.clip_norm = clip_norm
 
         self.q = q
+        self.q_entropy = q_entropy
         self.batch_size = batch_size
 
         self.tf_batch_size = None
@@ -379,7 +411,7 @@ class ExpRecurrentTeacher:
 
                         self.rnn_cell_stack = TPPRExpMarkedCellStacked(
                             hidden_state_size=(None, self.num_hidden_states),
-                            output_size=[self.num_hidden_states] + [1] * 3,
+                            output_size=[self.num_hidden_states] + [1] * 4,
                             tf_dtype=self.tf_dtype,
                             Wm=self.Wm_mini, Wr=self.Wr_mini,
                             Wh=self.Wh_mini, Wt=self.Wt_mini,
@@ -388,7 +420,7 @@ class ExpRecurrentTeacher:
                             Vy=self.Vy_mini
                         )
 
-                        ((self.h_states_stack, LL_log_terms_stack, LL_int_terms_stack, loss_terms_stack), tf_batch_h_t_mini) = tf.nn.dynamic_rnn(
+                        ((self.h_states_stack, LL_log_terms_stack, LL_int_terms_stack, loss_terms_stack, entropy_terms_stack), tf_batch_h_t_mini) = tf.nn.dynamic_rnn(
                             self.rnn_cell_stack,
                             inputs=(tf.expand_dims(self.tf_batch_b_idxes, axis=-1),
                                     tf.expand_dims(self.tf_batch_recalls, axis=-1),
@@ -401,6 +433,7 @@ class ExpRecurrentTeacher:
                         self.LL_log_terms_stack = tf.squeeze(LL_log_terms_stack, axis=-1)
                         self.LL_int_terms_stack = tf.squeeze(LL_int_terms_stack, axis=-1)
                         self.loss_terms_stack = tf.squeeze(loss_terms_stack, axis=-1)
+                        self.entropy_terms_stack = tf.squeeze(entropy_terms_stack, axis=-1)
 
                         # LL_last_term_stack = rnn_cell.last_LL(tf_batch_h_t_mini, self.tf_batch_last_interval)
                         # loss_last_term_stack = rnn_cell.last_loss(tf_batch_h_t_mini, self.tf_batch_last_interval)
@@ -409,7 +442,20 @@ class ExpRecurrentTeacher:
                         self.loss_last_term_stack = self.rnn_cell_stack.last_loss(tf_batch_h_t_mini, self.tf_batch_last_interval)
 
                         self.LL_stack = (tf.reduce_sum(self.LL_log_terms_stack, axis=1) - tf.reduce_sum(self.LL_int_terms_stack, axis=1)) + self.LL_last_term_stack
-                        self.loss_stack = (self.q / 2) * (tf.reduce_sum(self.loss_terms_stack, axis=1) + self.loss_last_term_stack) * tf.pow(tf.cast(self.global_step, self.tf_dtype), self.decay_q_rate)
+
+                        decay_term = tf.pow(tf.cast(self.global_step, self.tf_dtype), self.decay_q_rate)
+                        tf_seq_len = tf.squeeze(self.tf_batch_seq_len, axis=-1)
+                        self.entropy_stack = tf.where(
+                            tf.equal(tf_seq_len, 0),
+                            tf.zeros(shape=(inf_batch_size,), dtype=self.tf_dtype),
+                            tf.reduce_sum(self.entropy_terms_stack, axis=1) / tf.cast(tf_seq_len, self.tf_dtype),
+                            name='entropy_stack'
+                        )
+                        self.loss_stack = decay_term * (
+                            (self.q / 2) * (tf.reduce_sum(self.loss_terms_stack, axis=1) +
+                                            self.loss_last_term_stack) -
+                            self.q_entropy * self.entropy_stack
+                        )
 
             with tf.name_scope('calc_u'):
                 with tf.device(var_device):
@@ -472,10 +518,14 @@ class ExpRecurrentTeacher:
 
                 for x, y in zip(self.all_mini_vars, self.all_tf_vars):
                     LL_grad = self.LL_grad_stacked[x][0]
-                    if x == self.Vy_mini:
-                        loss_grad = 0
-                    else:
-                        loss_grad = self.loss_grad_stacked[x][0]
+
+                    # This is needed if the loss does not depend on certain parameters.
+                    # if x == self.Vy_mini:
+                    #     loss_grad = 0
+                    # else:
+                    #     loss_grad = self.loss_grad_stacked[x][0]
+
+                    loss_grad = self.loss_grad_stacked[x][0]
 
                     dim = len(LL_grad.get_shape())
                     if dim == 1:
@@ -508,8 +558,10 @@ class ExpRecurrentTeacher:
                         )
 
                 self.clipped_avg_gradients_stack, self.grad_norm_stack = \
-                    tf.clip_by_global_norm([grad for grad, _ in self.avg_gradient_stack],
-                                           clip_norm=self.clip_norm)
+                    tf.clip_by_global_norm(
+                        [grad for grad, _ in self.avg_gradient_stack],
+                        clip_norm=self.clip_norm
+                    )
 
                 self.clipped_avg_gradient_stack = list(zip(
                     self.clipped_avg_gradients_stack,
@@ -523,18 +575,25 @@ class ExpRecurrentTeacher:
             decay_rate=self.decay_rate
         )
 
-        self.opt = tf.train.AdamOptimizer(learning_rate=self.tf_learning_rate,
-                                          beta1=momentum)
-        self.sgd_stacked_op = self.opt.apply_gradients(self.clipped_avg_gradient_stack,
-                                                       global_step=self.global_step)
+        self.learning_bump = learning_bump
+        self.opt = tf.train.AdamOptimizer(
+            learning_rate=learning_bump * self.tf_learning_rate,
+            beta1=momentum
+        )
+        self.sgd_stacked_op = self.opt.apply_gradients(
+            self.clipped_avg_gradient_stack,
+            global_step=self.global_step
+        )
 
         self.sess = sess
 
         # There are other global variables as well, like the ones which the
         # ADAM optimizer uses.
-        self.saver = tf.train.Saver(tf.global_variables(),
-                                    keep_checkpoint_every_n_hours=0.25,
-                                    max_to_keep=1000)
+        self.saver = tf.train.Saver(
+            tf.global_variables(),
+            keep_checkpoint_every_n_hours=0.25,
+            max_to_keep=1000
+        )
 
         with tf.device(device_cpu):
             tf.contrib.training.add_gradients_summaries(self.avg_gradient_stack)
@@ -566,7 +625,8 @@ class ExpRecurrentTeacher:
             # https://stackoverflow.com/questions/38694111/
             self.sess.graph.finalize()
 
-    def train_many(self, num_iters, init_seed=42, with_summaries=False):
+    def train_many(self, num_iters, init_seed=42, with_summaries=False,
+                   with_MP=False, save_every=25):
         """Run one SGD op given a batch of simulation."""
 
         seed_start = init_seed + self.sess.run(self.global_step) * self.batch_size
@@ -580,48 +640,76 @@ class ExpRecurrentTeacher:
         grad_norm_op = self.grad_norm_stack
         LL_op = self.LL_stack
         loss_op = self.loss_stack
-
-        for iter_idx in range(num_iters):
-            seed_end = seed_start + self.batch_size
-
-            seeds = range(seed_start, seed_end)
-            scenarios = [run_scenario(self, seed) for seed in seeds]
-
-            num_events = [s.get_num_events() for s in scenarios]
-            f_d = get_feed_dict(self, scenarios)
-
-            if with_summaries:
-                reward, LL, loss, grad_norm, summaries, step, lr, _ = \
-                    self.sess.run([self.tf_batch_rewards, LL_op, loss_op,
-                                   grad_norm_op, self.tf_merged_summaries,
-                                   self.global_step, self.tf_learning_rate,
-                                   train_op],
-                                  feed_dict=f_d)
-                train_writer.add_summary(summaries, step)
-            else:
-                reward, LL, loss, grad_norm, step, lr, _ = \
-                    self.sess.run([self.tf_batch_rewards, LL_op, loss_op,
-                                   grad_norm_op, self.global_step,
-                                   self.tf_learning_rate, train_op],
-                                  feed_dict=f_d)
-
-            mean_LL = np.mean(LL)
-            mean_loss = np.mean(loss)
-            mean_reward = np.mean(reward)
-
-            print('{} Run {}, LL {:.5f}, loss {:.5f}, Rwd {:.5f}'
-                  ', CTG {:.5f}, seeds {}--{}, grad_norm {:.5f}, step = {}'
-                  ', lr = {:.5f}, events = {:.2f}'
-                  .format(_now(), iter_idx, mean_LL, mean_loss,
-                          mean_reward, mean_reward + mean_loss,
-                          seed_start, seed_end - 1, grad_norm, step, lr,
-                          np.mean(num_events)))
-
-            # Ready for the next iter_idx.
-            seed_start = seed_end
+        entropy_op = self.entropy_stack
 
         chkpt_file = os.path.join(self.save_dir, 'tpprl.ckpt')
-        self.saver.save(self.sess, chkpt_file, global_step=self.global_step,)
+
+        pool = None
+        try:
+            if with_MP:
+                pool = MP.Pool()
+
+            for iter_idx in range(num_iters):
+                seed_end = seed_start + self.batch_size
+
+                seeds = range(seed_start, seed_end)
+
+                if with_MP:
+                    raw_scenarios = [mk_scenario_from_teacher(self, seed)
+                                     for seed in seeds]
+                    scenarios = pool.map(_scenario_worker, raw_scenarios)
+                else:
+                    scenarios = [run_scenario(self, seed) for seed in seeds]
+
+                num_events = [s.get_num_events() for s in scenarios]
+                num_items_practised = [len(set(s.items)) for s in scenarios]
+                f_d = get_feed_dict(self, scenarios)
+
+                if with_summaries:
+                    reward, LL, loss, entropy, grad_norm, summaries, step, lr, _ = \
+                        self.sess.run([self.tf_batch_rewards, LL_op, loss_op,
+                                       entropy_op, grad_norm_op,
+                                       self.tf_merged_summaries,
+                                       self.global_step, self.tf_learning_rate,
+                                       train_op],
+                                      feed_dict=f_d)
+                    train_writer.add_summary(summaries, step)
+                else:
+                    reward, LL, loss, entropy, grad_norm, step, lr, _ = \
+                        self.sess.run([self.tf_batch_rewards, LL_op, loss_op,
+                                       entropy_op, grad_norm_op,
+                                       self.global_step, self.tf_learning_rate,
+                                       train_op],
+                                      feed_dict=f_d)
+
+                mean_LL = np.mean(LL)
+                mean_loss = np.mean(loss)
+                mean_reward = np.mean(reward)
+                mean_entropy = np.mean(entropy)
+
+                print('{} Run {}, LL {:.5f}, entropy {:.5f}, loss {:.5f}, Rwd {:.5f}'
+                      ', CTG {:.5f}, seeds {}--{}, grad_norm {:.5f}, step = {}'
+                      ', lr = {:.5f}, events = {:.2f}, items = {:.2f}/{}'
+                      .format(_now(), iter_idx, mean_LL, mean_entropy, mean_loss,
+                              mean_reward, mean_reward + mean_loss,
+                              seed_start, seed_end - 1, grad_norm, step, lr,
+                              np.mean(num_events), np.mean(num_items_practised),
+                              self.num_items))
+
+                # Ready for the next iter_idx.
+                seed_start = seed_end
+
+                if iter_idx % save_every == 0:
+                    print('Saving model!')
+                    self.saver.save(self.sess,
+                                    chkpt_file,
+                                    global_step=self.global_step,)
+
+        finally:
+            if pool is not None:
+                pool.close()
+            print('Saving model!')
+            self.saver.save(self.sess, chkpt_file, global_step=self.global_step,)
 
     def restore(self, restore_dir=None, epoch_to_recover=None):
         """Restores the model from a saved checkpoint."""
@@ -632,7 +720,7 @@ class ExpRecurrentTeacher:
         chkpt = tf.train.get_checkpoint_state(restore_dir)
 
         if epoch_to_recover is not None:
-            suffix = '-{}'.format(epoch_to_recover)
+            suffix = '-{}.meta'.format(epoch_to_recover)
             file = [x for x in chkpt.all_model_checkpoint_paths
                     if x.endswith(suffix)]
             if len(file) < 1:
@@ -842,10 +930,8 @@ def get_feed_dict(teacher, scenarios):
 
 
 def mk_scenario_from_opts(teacher_opts, seed):
-    alphas = teacher_opts.scenario_opts['alphas']
-    betas = teacher_opts.scenario_opts['betas']
-
-    return Scenario(alphas, betas, seed,
+    return Scenario(scenario_opts=teacher_opts.scenario_opts,
+                    seed=seed,
                     Wh=teacher_opts.Wh,
                     Wm=teacher_opts.Wm,
                     Wr=teacher_opts.Wr,
@@ -858,14 +944,12 @@ def mk_scenario_from_opts(teacher_opts, seed):
                     bt=teacher_opts.bt,
 
                     init_h=np.zeros((teacher_opts.num_hidden_states, 1)),
-                    T=100.0)
+                    T=teacher_opts.T)
 
 
 def mk_scenario_from_teacher(teacher, seed):
-    alphas = teacher.scenario_opts['alphas']
-    betas = teacher.scenario_opts['betas']
-
-    return Scenario(alphas, betas, seed,
+    return Scenario(scenario_opts=teacher.scenario_opts,
+                    seed=seed,
                     Wh=teacher.sess.run(teacher.tf_Wh),
                     Wm=teacher.sess.run(teacher.tf_Wm),
                     Wr=teacher.sess.run(teacher.tf_Wr),
@@ -881,7 +965,182 @@ def mk_scenario_from_teacher(teacher, seed):
                     T=teacher.t_max)
 
 
+def get_test_feed_dicts(teacher, seeds):
+    seeds = list(seeds)
+    scenarios = [mk_scenario_from_teacher(teacher, seed).run(max_events=MAX_EVENTS)
+                 for seed in seeds]
+    return (get_feed_dict(teacher, scenarios), scenarios)
+
+
 def run_scenario(teacher, seed):
-    scenario = mk_scenario_from_teacher(teacher, seed)
-    scenario.run(max_events=MAX_EVENTS)
+    return mk_scenario_from_teacher(teacher, seed).run(max_events=MAX_EVENTS)
+
+
+def _scenario_worker(scenario):
+    scenario.run()
     return scenario
+
+
+def uniform_baseline(scenario_opts, target_reviews, seed, T, tau, verbose=True):
+    """Distribute target_reviews uniformly over the study period."""
+    student = mk_standard_student(scenario_opts, seed=seed * 2)
+
+    num_items = scenario_opts['alphas'].shape[0]
+    per_item_reviews = target_reviews / num_items
+    interval = T / per_item_reviews
+
+    reviews = 0
+    for t in np.arange(0, T, interval):
+        for item in np.arange(num_items):
+            student.review(item, t)
+            reviews += 1
+
+    if verbose:
+        print('Total reviews = {}/{}'.format(reviews, target_reviews))
+
+    return np.mean([student.recall(item, T + tau)
+                    for item in range(num_items)])
+
+
+def sample_memorize(q_max, forgetting_rate, RS):
+    while True:
+        # dt = RS.
+        pass
+
+def memorize_baseline(scenario_opts, q_max, num_reviews, seed, T, tau, verbose=True):
+    student = mk_standard_student(scenario_opts, seed=seed * 2)
+    num_items = scenario_opts['alphas'].shape[0]
+
+    reviews = []
+    # for
+
+    # There will be `num_items` different processes which will be normalized
+    # to produce the net number of events.
+    #   u(t) = q * ()
+    pass
+
+
+
+## Sweeping q
+
+def calc_q_capacity_iter(sim_opts, q, seeds=None, parallel=True, dynamic=True, max_events=None):
+    if seeds is None:
+        seeds = range(10)
+
+    sim_opts = sim_opts.update({'q': q})
+
+    capacities = np.zeros(len(seeds), dtype=float)
+    if not parallel:
+        for idx, seed in enumerate(seeds):
+            m = sim_opts.create_manager_with_opt(seed)
+            if dynamic:
+                m.run_dynamic(max_events=max_events)
+            else:
+                m.run()
+            capacities[idx] = u_int_opt(m.state.get_dataframe(),
+                                        sim_opts=sim_opts)
+    else:
+        num_workers = min(len(seeds), mp.cpu_count())
+        with mp.Pool(num_workers) as pool:
+            for (idx, capacity) in \
+                enumerate(pool.imap(q_int_worker, [(sim_opts, x, dynamic, max_events)
+                                                   for x in seeds])):
+                capacities[idx] = capacity
+
+    return capacities
+
+
+
+# There are so many ways this can go south. Particularly, if the user capacity
+# is much higher than the average of the wall of other followees.
+def sweep_memorize_q(sim_opts, capacity_cap, q_init, tol=1e-2,
+                     verbose=False, parallel=True, max_events=None,
+                     max_iters=float('inf')):
+
+    # We know that on average, the ∫u(t)dt or number of events increases with
+    # increasing 'q'
+
+    def terminate_cond(new_capacity):
+        return abs(new_capacity - capacity_cap) / capacity_cap < tol or \
+            np.ceil(capacity_cap - 1) <= new_capacity <= np.ceil(capacity_cap + 1)
+
+    if q_init is None:
+        wall_mgr = sim_opts.create_manager_for_wall()
+        wall_mgr.run_dynamic()
+        r_t = RU.rank_of_src_in_df(wall_mgr.state.get_dataframe(), -1)
+        q_init = (4 * (r_t.iloc[-1].mean() ** 2) * (sim_opts.end_time) ** 2) / (np.pi * np.pi * (capacity_cap + 1) ** 4)
+        if verbose:
+            RU.logTime('q_init = {}'.format(q_init))
+
+    # Step 1: Find the upper/lower bound by exponential increase/decrease
+    init_cap = calc_q_capacity_iter(sim_opts, q_init, dynamic=dynamic, parallel=parallel, max_events=max_events).mean()
+
+    if terminate_cond(init_cap):
+        return q_init
+
+    if verbose:
+        RU.logTime('Initial capacity = {}, target capacity = {}, q_init = {}'
+                .format(init_cap, capacity_cap, q_init))
+
+    q = q_init
+    if init_cap < capacity_cap:
+        iters = 0
+        while True:
+            iters += 1
+            q_hi = q
+            q /= 2.0
+            q_lo = q
+            capacity = calc_q_capacity_iter(sim_opts, q, dynamic=dynamic, parallel=parallel, max_events=max_events).mean()
+            if verbose:
+                RU.logTime('q = {}, capacity = {}'.format(q, capacity))
+            if terminate_cond(capacity):
+                return q
+            if capacity >= capacity_cap:
+                break
+            if iters > max_iters:
+                if verbose:
+                    RU.logTime('Breaking because of max-iters: {}.'.format(max_iters))
+                return q
+    else:
+        iters = 0
+        while True:
+            iters += 1
+            q_lo = q
+            q *= 2.0
+            q_hi = q
+            capacity = calc_q_capacity_iter(sim_opts, q, dynamic=dynamic, parallel=parallel, max_events=max_events).mean()
+            if verbose:
+                RU.logTime('q = {}, capacity = {}'.format(q, capacity))
+            # TODO: will break if capacity_cap is too low ~ 1 event.
+            if terminate_cond(capacity):
+                return q
+            if capacity <= capacity_cap:
+                break
+            if iters > max_iters:
+                if verbose:
+                    RU.logTime('Breaking because of max-iters: {}.'.format(max_iters))
+                return q
+
+    if verbose:
+        RU.logTime('q_hi = {}, q_lo = {}'.format(q_hi, q_lo))
+
+    # Step 2: Keep bisecting on 's' until we arrive at a close enough solution.
+    while True:
+        q = (q_hi + q_lo) / 2.0
+        new_capacity = calc_q_capacity_iter(sim_opts, q, dynamic=dynamic, parallel=parallel, max_events=max_events).mean()
+
+        if verbose:
+            RU.logTime('new_capacity = {}, q = {}'.format(new_capacity, q))
+
+        if terminate_cond(new_capacity):
+            # Have converged
+            break
+        elif new_capacity > capacity_cap:
+            q_lo = q
+        else:
+            q_hi = q
+
+    # Step 3: Return
+    return q
+
+
