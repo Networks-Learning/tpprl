@@ -619,19 +619,33 @@ class OptAlgo(OM.Broadcaster):
             # drawing happen only once after all the updates have been applied
             # or one at a time? Does that make a difference? Probably not. A
             # lot more work if the events are sent one by one per wall, though.
-            new_rate = self.sqrt_s_by_q.dot(r_t)
-            diff_rate = new_rate - self.old_rate
+            new_rate, old_rate = self.sqrt_s_by_q.dot(r_t), self.old_rate
+            diff_rate = new_rate - old_rate
             self.old_rate = new_rate
+            cur_time = event.cur_time
 
             if diff_rate > 0:
+                # Super-positioning.
                 t_delta_new = self.random_state.exponential(scale=1.0 / diff_rate)
-                cur_time = event.cur_time
 
                 if self.last_self_event_time + self.t_delta > cur_time + t_delta_new:
                     return cur_time + t_delta_new - self.last_self_event_time
+                else:
+                    # Stick to the old estimate.
+                    pass
             else:
-                # TODO: Rejection sampling here to reject events, akin to Curb.
-                pass
+                unif = self.random_state.uniform()
+                if new_rate / old_rate < unif:
+                    # Rejection sampling would have rejected this time
+                    # So sample the next time using the new rate, starting from previous sample.
+                    if new_rate == 0:
+                        return np.inf
+
+                    t_delta_new = self.t_delta + self.random_state.exponential(scale=1.0 / new_rate)
+                    return cur_time + t_delta_new - self.last_self_event_time
+                else:
+                    # Stick to the old estimate.
+                    pass
 
 
 def calc_q_capacity_iter_algo(sim_opts, q, algo_c, algo_feed_args,
@@ -754,4 +768,3 @@ def sweep_q_algo(sim_opts, capacity_cap, algo_feed_args, algo_c, tol=1e-2,
 
     # Step 3: Return
     return q
-
