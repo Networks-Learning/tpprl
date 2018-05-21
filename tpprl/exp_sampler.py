@@ -200,6 +200,36 @@ def make_prefs(sink_ids, src_ids, src_lifetime_dict, seed=42):
     }
 
 
+def make_freq_prefs(one_user_data, sink_ids, src_lifetime_dict):
+    """Creates preferences using the frequency of broadcasters to assign them
+    priority."""
+    sink_prefs = np.asarray([1.] * len(sink_ids))
+    num_tweets_src_id = sorted([
+        (len(d['times']), d['src_id'])
+        for x, d in one_user_data['sim_opts'].other_sources
+    ], reverse=True)
+
+    num_src = len(num_tweets_src_id) + 1
+
+    src_prefs = np.zeros(num_src)
+    src_id_map = {one_user_data['user_id']: num_src - 1}
+    for idx, (_, src_id) in enumerate(num_tweets_src_id):
+        # print(src_id)
+        src_id_map[src_id] = idx
+        src_prefs[idx] = idx + 1
+
+    src_prefs[num_src - 1] = (num_src  / 2)
+
+    return {
+        'sink_id_map': dict([(x, idx) for idx, x in enumerate(sink_ids)]),
+        'src_id_map': src_id_map,
+        'sink_prefs': sink_prefs,
+        'src_prefs': src_prefs,
+        'lifetime': src_lifetime_dict,
+        'one_user_data': one_user_data
+    }
+
+
 def algo_rank_of(past_events, sink_id, src_id, all_prefs, c=1.0, t=None):
     """Find the algorithm rank of src_id on the feed of sink_id."""
 
@@ -208,6 +238,8 @@ def algo_rank_of(past_events, sink_id, src_id, all_prefs, c=1.0, t=None):
 
     if t is None:
         t = past_events[-1].cur_time
+    else:
+        past_events = [ev for ev in past_events if ev.cur_time <= t]
 
     lifetime = all_prefs['lifetime']
     sink_idx = all_prefs['sink_id_map'][sink_id]
@@ -283,27 +315,39 @@ def algo_true_rank(sink_ids, src_id, events, start_time, end_time,
     """A more accurate calculation (but more expensive) of the average algorithm rank."""
     t_delta = (end_time - start_time) / steps
     times = np.arange(start_time, end_time, t_delta)
-    ranks = []
-    rank = 0
-    idx = 0
-
-    for t in times:
-        while idx + 1 < len(events) and events[idx + 1].cur_time < t:
-            idx += 1
-
-        rank = np.mean(
-            [algo_rank_of(past_events=events[:idx],
+    ranks = [
+        np.mean(
+            [algo_rank_of(past_events=events,
                           sink_id=x,
                           src_id=src_id,
                           all_prefs=all_prefs,
                           t=t,
                           c=c) ** (1.0 if not square else 2.0)
              for x in sink_ids]
-        )
-        # if idx > 1:
-        #     print(t, events[:idx][-1].cur_time, rank)
+        ) for t in times
+    ]
 
-        ranks.append(rank)
+    # ranks = []
+    # rank = 0
+    # idx = 0
+
+    # for t in times:
+    #     while idx + 1 < len(events) and events[idx + 1].cur_time < t:
+    #         idx += 1
+
+    #     rank = np.mean(
+    #         [algo_rank_of(past_events=events[:idx],
+    #                       sink_id=x,
+    #                       src_id=src_id,
+    #                       all_prefs=all_prefs,
+    #                       t=t,
+    #                       c=c) ** (1.0 if not square else 2.0)
+    #          for x in sink_ids]
+    #     )
+    #     # if idx > 1:
+    #     #     print(t, events[:idx][-1].cur_time, rank)
+
+    #     ranks.append(rank)
 
     return times, np.asarray(ranks)
 
@@ -329,26 +373,39 @@ def algo_top_k(sink_ids, src_id, events, start_time, end_time, K,
     """A more accurate calculation (but more expensive) of time spent in top-k."""
     t_delta = (end_time - start_time) / steps
     times = np.arange(start_time, end_time, t_delta)
-    top_ks = []
-    top_k = 0
-    idx = 0
 
-    for t in times:
-        while idx + 1 < len(events) and events[idx + 1].cur_time < t:
-            idx += 1
+    def in_top_k(t, sink_id):
+        return 1.0 if algo_rank_of(past_events=events,
+                                     sink_id=sink_id,
+                                     src_id=src_id,
+                                     all_prefs=all_prefs,
+                                     t=t, c=c) < K else 0.0
 
-        top_k = np.mean(
-            [1.0 if (algo_rank_of(past_events=events[:idx],
-                                  sink_id=x,
-                                  src_id=src_id,
-                                  all_prefs=all_prefs,
-                                  t=t,
-                                  c=c)) < K else 0.0
-             for x in sink_ids]
-        )
-        top_ks.append(top_k)
+    top_ks = [
+        np.mean([in_top_k(t, x) for x in sink_ids])
+        for t in times
+    ]
+    return times, top_ks
+    # top_ks = []
+    # top_k = 0
+    # idx = 0
 
-    return times, np.asarray(top_ks)
+    # for t in times:
+    #     while idx + 1 < len(events) and events[idx + 1].cur_time < t:
+    #         idx += 1
+
+    #     top_k = np.mean(
+    #         [1.0 if (algo_rank_of(past_events=events[:idx],
+    #                               sink_id=x,
+    #                               src_id=src_id,
+    #                               all_prefs=all_prefs,
+    #                               t=t,
+    #                               c=c)) < K else 0.0
+    #          for x in sink_ids]
+    #     )
+    #     top_ks.append(top_k)
+
+    # return times, np.asarray(top_ks)
 
 
 def algo_top_k_reward(sink_ids, src_id, events, start_time, end_time, K,
@@ -624,7 +681,10 @@ class OptAlgo(OM.Broadcaster):
             self.old_rate = new_rate
             cur_time = event.cur_time
 
-            if diff_rate > 0:
+            if diff_rate == 0:
+                # Nothing changed?
+                pass
+            elif diff_rate > 0:
                 # Super-positioning.
                 t_delta_new = self.random_state.exponential(scale=1.0 / diff_rate)
 
@@ -651,7 +711,7 @@ class OptAlgo(OM.Broadcaster):
 def calc_q_capacity_iter_algo(sim_opts, q, algo_c, algo_feed_args,
                               seeds=None, max_events=None, t_min=0):
     if seeds is None:
-        seeds = range(10)
+        seeds = range(300, 320)
 
     sim_opts = sim_opts.update({'q': q})
 
@@ -668,9 +728,9 @@ def calc_q_capacity_iter_algo(sim_opts, q, algo_c, algo_feed_args,
     return capacities
 
 
-def sweep_q_algo(sim_opts, capacity_cap, algo_feed_args, algo_c, tol=1e-2,
-                 verbose=False, q_init=1000.0, max_events=None,
-                 max_iters=float('inf'), t_min=0, only_tol=False):
+def sweep_q_algo(sim_opts, capacity_cap, algo_feed_args, algo_c, t_min,
+                 tol=1e-2, verbose=False, q_init=1000.0, max_events=None,
+                 max_iters=float('inf'), only_tol=False):
     # We know that on average, the ∫u(t)dt decreases with increasing 'q'
 
     def terminate_cond(new_capacity):

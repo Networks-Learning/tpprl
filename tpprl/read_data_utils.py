@@ -45,4 +45,20 @@ def prune_one_user_data(one_user_data):
     return new_user_data
 
 
+def merge_sinks(one_user_data):
+    """Merges all sinks into one single wall."""
+    merged_sinks_data = one_user_data.copy()
+    sink_id = 999
 
+    new_edge_list = [(one_user_data['user_id'], sink_id)]
+    for (k, d) in one_user_data['sim_opts'].other_sources:
+        new_edge_list.append((d['src_id'], sink_id))
+
+    new_sim_opts = one_user_data['sim_opts'].update({
+        'edge_list': new_edge_list,
+        'sink_ids': [sink_id],
+        's': 1.0
+    })
+
+    merged_sinks_data['sim_opts'] = new_sim_opts
+    return merged_sinks_data
