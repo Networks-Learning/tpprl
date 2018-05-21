@@ -23,11 +23,25 @@ We obtained the parameters from the item difficulties via personal correspondenc
 
 Running experiments:
 
- - `sbatch/exp_run.py`: Running Smart Broadcasting experiments on a SLURM cluster.
- - `rq_compare-algo.py`: Running one experiment for Smart Broadcastering.
- - `compare_results-algo.py`: Reads output produced by `rq_compare-algo.py` and compares it with baselines.
- - TODO: Scripts for running MEMORIZE training.
+### `sbatch/exp_run.py`
 
-## Reproducing plots
+This script is used for running Smart Broadcasting experiments on a SLURM cluster using the job scripts `sbatch/r_2_job.sh` and `sbatch/top_k_job.sh`.
+
+The job scripts assumes that there is a conda environment with the name `tf-cpu` and that the code resides in `${HOME}/prog/work/broadcast-rl/` folder. These details can be edited easily to match with any host's configuration via the scripts themselves.
+
+### `rq_compare-algo.py`
+
+This script is used for running an experiment for one-user in the Smart Broadcasting setup.
+
+
+### `compare_results-algo.py`
+
+Reads output produced by `rq_compare-algo.py` and compares it against baselines and saves the results in a CSV file ready for analysis/plotting.
+
+### `memorize_exp.py`
+
+TODO: Scripts for running MEMORIZE training.
+
+## Reproducing figures
 
 TODO
