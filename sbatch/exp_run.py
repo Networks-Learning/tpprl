@@ -4,10 +4,8 @@ import pandas as pd
 import click
 import os
 
-INPUT_FILE = "/NL/redqueen/work/rl-broadcast/users-1k-HR-5-followers-pruned-200-own-posts-trimmed-2.dill"
-# OUTPUT_DIR = "/NL/crowdjudged/work/rl-broadcast/r_2/"
-# OUTPUT_DIR = "/NL/crowdjudged/work/rl-broadcast/r_2-sim-opt-fix/"
-OUTPUT_DIR = "/NL/crowdjudged/work/rl-broadcast/top_k-sim-opt-fix/"
+OUTPUT_DIR = "/tmp"
+
 
 @click.command()
 @click.argument('in_csv')
@@ -19,7 +17,6 @@ OUTPUT_DIR = "/NL/crowdjudged/work/rl-broadcast/top_k-sim-opt-fix/"
 @click.option('--mem', 'mem', help='How much memory will each job need (MB).', default=10000)
 @click.option('--until', 'until', help='Until which step to run the experiments.', default=1000)
 @click.option('--save-every', 'save_every', help='How many epochs to save output at.', default=5)
-@click.option('--q', 'q', help='Which q value to use. Negative values imply using the value in the CSV file.', default=-1.0)
 @click.option('--q', 'q', help='Which q value to use. Negative values imply using the value in the CSV file.', default=-1.0)
 @click.option('--N', 'N', help='What should be the average number of posts in a window?', default=300)
 @click.option('--algo-feed/--no-algo-feed', 'algo_feed', help='Use algorithmic feeds.', default=False)
