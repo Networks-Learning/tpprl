@@ -4,11 +4,13 @@ import dill
 import os
 import tpprl.exp_sampler as ES
 import tpprl.exp_broadcaster as EB
+import tpprl.read_data_utils as RDU
 from tpprl.utils import _now
 import tensorflow as tf
 import numpy as np
 import warnings
 import sys
+from collections import defaultdict
 
 
 def log_eval(u_data):
@@ -43,11 +45,14 @@ def log_eval(u_data):
 @click.option('--log-device-placement/--no-log-device-placement', 'log_device_placement', help='Whether to list which GPU is being used.', default=False)
 @click.option('--allow-growth/--no-allow-growth', 'allow_growth', help='Whether to grow GPU memory or allocate all together.', default=True)
 @click.option('--algo-feed/--no-algo-feed', 'algo_feed', help='Use algorithmic feeds.', default=False)
-@click.option('--algo-c', 'algo_c', help='The decay parameter for algorithmic feeds.', default=0.5)
+@click.option('--algo-c', 'algo_c', help='DEPRECATED: The decay parameter for algorithmic feeds.', default=0.5)
+@click.option('--algo-lifetime-frac', 'algo_lifetime_frac', help='The decay parameter for algorithmic feeds.', default=0.1)
 @click.option('--algo-approx/--no-algo-approx', 'with_approx_rewards', help='Whether to use exact or approximate rewards for algorithmic feeds.', default=True)
-def run(all_user_data_file, user_idx, output_dir, q, N, gpu, reward_kind, K, should_restore,
+@click.option('--merge-sinks/--no-merge-sinks', 'merge_sinks', help='Should all followers be merged into one giant wall.', default=True)
+def run(all_user_data_file, user_idx, output_dir, q, N, gpu, reward_kind, K, should_restore, algo_lifetime_frac,
         hidden_dims, only_cpu, with_summaries, epochs, num_iters, save_every, until,
-        log_device_placement, allow_growth, algo_feed, algo_c, with_approx_rewards):
+        log_device_placement, allow_growth, algo_feed, algo_c, with_approx_rewards,
+        merge_sinks):
     """Read data from `all_user_data`, extract `user_idx` from the array and run code for it."""
 
     assert reward_kind in [EB.R_2_REWARD, EB.TOP_K_REWARD], '"{}" is not recognized as a reward_kind.'.format(reward_kind)
@@ -59,6 +64,10 @@ def run(all_user_data_file, user_idx, output_dir, q, N, gpu, reward_kind, K, sho
     with open(all_user_data_file, 'rb') as f:
         all_user_data = dill.load(f)
         one_user_data = all_user_data[user_idx]
+
+        if merge_sinks:
+            print(_now(), 'Merging the sinks!')
+            one_user_data = RDU.merge_sinks(one_user_data)
 
     print(_now(), 'Making the trainer ...')
     sim_opts = one_user_data['sim_opts'].update({'q': q})
@@ -105,12 +114,15 @@ def run(all_user_data_file, user_idx, output_dir, q, N, gpu, reward_kind, K, sho
     print(_now(), 'trainer made.')
 
     sink_ids = one_user_data['sim_opts'].sink_ids
-    src_ids = [src_id
-               for (src_id, x) in sorted(trainer.src_embed_map.items(),
-                                         key=lambda x: x[1])]
+    window_len = (one_user_data['duration'] / one_user_data['num_other_posts']) * N
+    lifetimes = defaultdict(lambda: algo_lifetime_frac * window_len)
 
     algo_feed_seed = 42 + 1
-    algo_feed_args = ES.make_prefs(sink_ids, src_ids, seed=algo_feed_seed)
+    algo_feed_args = ES.make_freq_prefs(
+        one_user_data=one_user_data,
+        sink_ids=sink_ids,
+        src_lifetime_dict=lifetimes
+    )
 
     user_opt_dict = {}
     user_opt_dict['trainer_opts_dict'] = trainer_opts._get_dict()
