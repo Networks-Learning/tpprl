@@ -5,9 +5,11 @@ import decorated_options as Deco
 import warnings
 import multiprocessing as MP
 import redqueen.utils as RU
+import heapq
 
 SAVE_DIR = 'teacher-log'
 MAX_EVENTS = 100000
+REWARD_SCALING = 100
 
 # DEBUG ONLY
 try:
@@ -26,25 +28,54 @@ def softmax(x):
 class Student:
     def __init__(self, n_0s, alphas, betas, seed):
         """n_0 is the initial expertise in all items."""
-        self.ns = n_0s
+        self.ns = np.asarray([x for x in n_0s])
         self.alphas = alphas
         self.betas = betas
         self.seed = seed
         self.last_review_times = np.zeros_like(n_0s)
         self.RS = np.random.RandomState(seed)
+        self.int_m1_sq = 0
 
     def review(self, item, cur_time):
         recall = self.recall(item, cur_time)
+        n_i = self.ns[item]
+
+        # Calculate the (1 - m(t))^2 loss of the past interval.
+        t_delta = cur_time - self.last_review_times[item]
+        x = t_delta + (1. / n_i) * (
+            2.0 * np.exp(-n_i * t_delta) -
+            0.5 * np.exp(-2.0 * n_i * t_delta) -
+            1.5
+        )
+        # print('x = ', x, 'n_i =', n_i, 't_delta = ', t_delta, '2.0 * np.exp(-n_i * t_delta) = ', 2.0 * np.exp(-n_i * t_delta), '0.5 * np.exp(-2.0 * n_i * t_delta) = ', 0.5 * np.exp(-2.0 * n_i * t_delta), ' total =', (
+        #     2.0 * np.exp(-n_i * t_delta) -
+        #     0.5 * np.exp(-2.0 * n_i * t_delta) -
+        #     1.5
+        # ))
+        self.int_m1_sq  += x
+
         if recall:
-            self.ns[item] *= (1 - self.alphas[item])
+            n_new = n_i * (1 - self.alphas[item])
         else:
-            self.ns[item] *= (1 + self.betas[item])
+            n_new = n_i * (1 + self.betas[item])
 
-        # The numbers need to be more carefully tuned.
-        self.ns[item] = min(max(1e-6, self.ns[item]), 1e2)
-
+        # The numbers need to be more carefully tuned?
+        self.ns[item] = min(max(1e-6, n_new), 1e2)
         self.last_review_times[item] = cur_time
+
         return recall
+
+    def get_m1_sq(self, episode_end_time):
+        m1 = self.int_m1_sq
+        for item in range(len(self.ns)):
+            t_delta = episode_end_time - self.last_review_times[item]
+            n_i = self.ns[item]
+            m1 += t_delta + (1. / n_i) * (
+                2.0 * np.exp(-n_i * t_delta) -
+                0.5 * np.exp(-2.0 * n_i * t_delta) -
+                1.5
+            )
+        return m1
 
     def recall(self, item, t):
         m_t = self.prob_recall(item, t)
@@ -57,14 +88,14 @@ class Student:
 def mk_standard_student(scenario_opts, seed):
     alphas = scenario_opts['alphas']
     betas = scenario_opts['betas']
-    n_0s = np.ones_like(alphas)
+    n_0s = scenario_opts['n_0s']
     return Student(n_0s, alphas, betas, seed)
 
 
 class Scenario:
     def __init__(self, scenario_opts, seed,
                  Wm, Wh, Wr, Wt, Bh, Vy,
-                 wt, vt, bt, init_h, T):
+                 wt, vt, bt, init_h):
 
         self.num_items = Vy.shape[1]
         self.student = mk_standard_student(scenario_opts, seed=seed * 2)
@@ -78,7 +109,8 @@ class Scenario:
 
         self._init = False
         self.cur_h = init_h
-        self.T = T
+        self.T = scenario_opts['T']
+        self.default_tau = scenario_opts['tau']
         self.RS = np.random.RandomState(seed)
         self.last_time = -1
 
@@ -86,19 +118,18 @@ class Scenario:
         self.hidden_states = []
         self.time_deltas = []
         self.recalls = []
+        self._recall_probs = []
         self.items = []
         self.item_probs = []
-
-        # self.params = Deco.Options(**{
-        #     'wt': wt,
-        #     'vt': vt,
-        #     'bt': bt,
-        #     'init_h': init_h
-        # })
 
         self.exp_sampler = ExpCDFSampler(wt=wt, vt=vt, bt=bt, init_h=init_h,
                                          t_min=0,
                                          seed=seed + 1)
+
+    def get_m1_sq(self):
+        """Calculates the (1 - m)^2 reward for this scenario."""
+        assert self._init
+        return self.student.get_m1_sq(self.T)
 
     def get_all_c_is(self):
         assert self._init
@@ -131,6 +162,7 @@ class Scenario:
 
     def update_hidden_state(self, item, t, time_delta):
         """Returns the hidden state after a post by src_id and time delta."""
+        self._recall_probs.append(self.student.prob_recall(item, t))
         recall = float(self.student.review(item, t))
         self.recalls.append(recall)
 
@@ -183,8 +215,11 @@ class Scenario:
 
         return self
 
-    def reward(self, tau):
+    def reward(self, tau=None):
         """Returns the result of a test conducted at T + tau."""
+        if tau is None:
+            tau = self.default_tau
+
         return np.mean([self.student.recall(item, self.T + tau)
                        for item in range(self.num_items)])
 
@@ -264,8 +299,8 @@ class ExpRecurrentTeacher:
 
         self.t_min = 0
         self.t_max = T
-        self.T = T
-        self.tau = tau
+        # self.T = T
+        # self.tau = tau
 
         self.summary_dir = summary_dir
         self.save_dir = save_dir
@@ -420,7 +455,10 @@ class ExpRecurrentTeacher:
                             Vy=self.Vy_mini
                         )
 
-                        ((self.h_states_stack, LL_log_terms_stack, LL_int_terms_stack, loss_terms_stack, entropy_terms_stack), tf_batch_h_t_mini) = tf.nn.dynamic_rnn(
+                        ((self.h_states_stack, LL_log_terms_stack,
+                          LL_int_terms_stack, loss_terms_stack,
+                          entropy_terms_stack),
+                         tf_batch_h_t_mini) = tf.nn.dynamic_rnn(
                             self.rnn_cell_stack,
                             inputs=(tf.expand_dims(self.tf_batch_b_idxes, axis=-1),
                                     tf.expand_dims(self.tf_batch_recalls, axis=-1),
@@ -626,7 +664,8 @@ class ExpRecurrentTeacher:
             self.sess.graph.finalize()
 
     def train_many(self, num_iters, init_seed=42, with_summaries=False,
-                   with_MP=False, save_every=25):
+                   with_MP=False, save_every=25, with_recall_probs=False,
+                   with_memorize_loss=False):
         """Run one SGD op given a batch of simulation."""
 
         seed_start = init_seed + self.sess.run(self.global_step) * self.batch_size
@@ -663,7 +702,12 @@ class ExpRecurrentTeacher:
 
                 num_events = [s.get_num_events() for s in scenarios]
                 num_items_practised = [len(set(s.items)) for s in scenarios]
-                f_d = get_feed_dict(self, scenarios)
+
+                num_correct = [np.sum(s.get_recalls()) for s in scenarios]
+
+                f_d = get_feed_dict(self, scenarios,
+                                    with_recall_probs=with_recall_probs,
+                                    with_memorize_loss=with_memorize_loss)
 
                 if with_summaries:
                     reward, LL, loss, entropy, grad_norm, summaries, step, lr, _ = \
@@ -683,18 +727,41 @@ class ExpRecurrentTeacher:
                                       feed_dict=f_d)
 
                 mean_LL = np.mean(LL)
-                mean_loss = np.mean(loss)
-                mean_reward = np.mean(reward)
-                mean_entropy = np.mean(entropy)
+                std_LL = np.std(LL)
 
-                print('{} Run {}, LL {:.5f}, entropy {:.5f}, loss {:.5f}, Rwd {:.5f}'
-                      ', CTG {:.5f}, seeds {}--{}, grad_norm {:.5f}, step = {}'
-                      ', lr = {:.5f}, events = {:.2f}, items = {:.2f}/{}'
-                      .format(_now(), iter_idx, mean_LL, mean_entropy, mean_loss,
-                              mean_reward, mean_reward + mean_loss,
-                              seed_start, seed_end - 1, grad_norm, step, lr,
-                              np.mean(num_events), np.mean(num_items_practised),
-                              self.num_items))
+                mean_loss = np.mean(loss)
+                std_loss = np.std(loss)
+
+                mean_reward = np.mean(reward)
+                std_reward = np.std(reward)
+
+                mean_CTG = np.mean(loss + reward)
+                std_CTG = np.std(loss + reward)
+
+                mean_entropy = np.mean(entropy)
+                std_entropy = np.std(entropy)
+
+                mean_events = np.mean(num_events)
+                std_events = np.std(num_events)
+
+                mean_correct = np.mean(num_correct)
+                std_correct = np.std(num_correct)
+
+                print('{} Run {}, LL {:.2f}±{:.2f}, entropy {:.2f}±{:.2f}, loss {:.2f}±{:.2f}, Rwd {:.3f}±{:.3f}'
+                      ', CTG {:.3f}±{:.3f}, seeds {}--{}, grad_norm {:.2f}, step = {}'
+                      ', lr = {:.5f}, events = {:.2f}±{:.2f}/{:.2f}±{:.2f}, items = {:.2f}/{}, wt={:.5f}, bt={:.5f}'
+                      .format(_now(), iter_idx,
+                              mean_LL, std_LL,
+                              mean_entropy, std_entropy,
+                              mean_loss, std_loss,
+                              mean_reward, std_reward,
+                              mean_CTG, std_CTG,
+                              seed_start, seed_end - 1,
+                              grad_norm, step, lr,
+                              mean_correct, std_correct,
+                              mean_events, std_events,
+                              np.mean(num_items_practised), self.num_items,
+                              self.sess.run(self.tf_wt)[0], self.sess.run(self.tf_bt)[0]))
 
                 # Ready for the next iter_idx.
                 seed_start = seed_end
@@ -883,19 +950,36 @@ class ExpRecurrentTeacher:
         }
 
 
-def get_feed_dict(teacher, scenarios):
+def get_feed_dict(teacher, scenarios, with_recall_probs=False, with_memorize_loss=False):
     """Produce a feed_dict for the given list of scenarios."""
 
     # assert all(df.sink_id.nunique() == 1 for df in batch_df), "Can only handle one sink at the moment."
 
     batch_size = len(scenarios)
     max_events = max(s.get_num_events() for s in scenarios)
+    num_items = scenarios[0].num_items
 
     full_shape = (batch_size, max_events)
 
-    batch_rewards = np.asarray([
-        -s.reward(teacher.tau) for s in scenarios
-    ])[:, np.newaxis]
+    if with_memorize_loss:
+        batch_rewards = np.asarray([
+            s.get_m1_sq() for s in scenarios
+        ])[:, np.newaxis]
+    else:
+        if not with_recall_probs:
+            batch_rewards = np.asarray([
+                -REWARD_SCALING * s.reward() for s in scenarios
+            ])[:, np.newaxis]
+        else:
+            # We are exploiting the fact that we are training against a simulator.
+            #
+            # Will use this to investigate appropriate parameter space before
+            # switching to stochastic rewards.
+            batch_rewards = np.asarray([
+                -REWARD_SCALING * np.mean([s.student.prob_recall(item, s.T + s.default_tau)
+                                           for item in range(num_items)])
+                for s in scenarios
+            ])[:, np.newaxis]
 
     batch_last_interval = np.asarray([
         s.get_last_interval() for s in scenarios
@@ -943,8 +1027,7 @@ def mk_scenario_from_opts(teacher_opts, seed):
                     wt=teacher_opts.wt,
                     bt=teacher_opts.bt,
 
-                    init_h=np.zeros((teacher_opts.num_hidden_states, 1)),
-                    T=teacher_opts.T)
+                    init_h=np.zeros((teacher_opts.num_hidden_states, 1)))
 
 
 def mk_scenario_from_teacher(teacher, seed):
@@ -961,15 +1044,14 @@ def mk_scenario_from_teacher(teacher, seed):
                     wt=teacher.sess.run(teacher.tf_wt),
                     bt=teacher.sess.run(teacher.tf_bt),
 
-                    init_h=np.zeros((teacher.num_hidden_states, 1)),
-                    T=teacher.t_max)
+                    init_h=np.zeros((teacher.num_hidden_states, 1)))
 
 
-def get_test_feed_dicts(teacher, seeds):
+def get_test_feed_dicts(teacher, seeds, **kwargs):
     seeds = list(seeds)
     scenarios = [mk_scenario_from_teacher(teacher, seed).run(max_events=MAX_EVENTS)
                  for seed in seeds]
-    return (get_feed_dict(teacher, scenarios), scenarios)
+    return (get_feed_dict(teacher, scenarios, **kwargs), scenarios)
 
 
 def run_scenario(teacher, seed):
@@ -981,79 +1063,160 @@ def _scenario_worker(scenario):
     return scenario
 
 
-def uniform_baseline(scenario_opts, target_reviews, seed, T, tau, verbose=True):
+# Baselines
+
+def uniform_baseline(scenario_opts, target_reviews, seed, verbose=True):
     """Distribute target_reviews uniformly over the study period."""
     student = mk_standard_student(scenario_opts, seed=seed * 2)
+    T = scenario_opts['T']
+    tau = scenario_opts['tau']
 
     num_items = scenario_opts['alphas'].shape[0]
     per_item_reviews = target_reviews / num_items
     interval = T / per_item_reviews
 
     reviews = 0
+    review_timings = []
     for t in np.arange(0, T, interval):
         for item in np.arange(num_items):
             student.review(item, t)
+            review_timings.append((item, t))
             reviews += 1
 
     if verbose:
         print('Total reviews = {}/{}'.format(reviews, target_reviews))
 
-    return np.mean([student.recall(item, T + tau)
-                    for item in range(num_items)])
+    return {
+        'reward': -REWARD_SCALING * np.mean([student.recall(item, T + tau)
+                                             for item in range(num_items)]),
+        'student': student,
+        'num_reviews': reviews,
+        'review_timings': review_timings,
+    }
 
+
+def uniform_random_baseline(
+        scenario_opts, target_reviews,
+        seed, verbose=True
+):
+    """Distribute target_reviews uniformly over the study period."""
+    student = mk_standard_student(scenario_opts, seed=seed * 2)
+    num_items = len(scenario_opts['n_0s'])
+    T, tau = scenario_opts['T'], scenario_opts['tau']
+
+    RS = np.random.RandomState(seed)
+    num_random_reviews = RS.poisson(target_reviews)
+
+    items = RS.choice(np.arange(num_items),
+                      size=num_random_reviews,
+                      replace=True)
+    reviews_times = RS.uniform(size=num_random_reviews) * T
+
+    review_timings = []
+    for (item, t) in zip(items, reviews_times):
+        student.review(item, t)
+        review_timings.append((item, t))
+
+    if verbose:
+        print('Total reviews = {}/{}'
+              .format(num_random_reviews, target_reviews))
+
+    return {
+        'reward': -REWARD_SCALING * np.mean([student.recall(item, T + tau)
+                                             for item in range(num_items)]),
+        'student': student,
+        'num_reviews': num_random_reviews,
+        'review_timings': review_timings,
+    }
+
+
+# Memorize implementation
 
 def sample_memorize(q_max, forgetting_rate, RS):
+    dt = 0
     while True:
-        # dt = RS.
-        pass
+        dt += RS.exponential(scale=1.0 / q_max)
+        if RS.uniform() < 1 - np.exp(-forgetting_rate * dt):
+            return dt
 
-def memorize_baseline(scenario_opts, q_max, num_reviews, seed, T, tau, verbose=True):
+
+def memorize_baseline(scenario_opts, q_max, seed, verbose=True):
     student = mk_standard_student(scenario_opts, seed=seed * 2)
     num_items = scenario_opts['alphas'].shape[0]
+    T, tau = scenario_opts['T'], scenario_opts['tau']
 
     reviews = []
-    # for
+    RS = np.random.RandomState(seed=seed * 7)
+    for item in range(num_items):
+        next_t_delta = sample_memorize(
+            q_max, student.ns[item], RS
+        )
+        heapq.heappush(reviews, (next_t_delta, item))
 
-    # There will be `num_items` different processes which will be normalized
-    # to produce the net number of events.
-    #   u(t) = q * ()
-    pass
+    num_reviews = 0
+    review_timings = []
+    while True:
+        (next_t, item) = heapq.heappop(reviews)
+        if next_t > T:
+            break
+
+        num_reviews += 1
+        student.review(item, next_t)
+        review_timings.append((item, next_t))
+        next_t_delta = sample_memorize(q_max, student.ns[item], RS)
+        heapq.heappush(reviews, (next_t + next_t_delta, item))
+
+    return {
+        'reward': - REWARD_SCALING * np.mean([
+            student.recall(item, T + tau) for item in range(num_items)
+        ]),
+        'num_reviews': num_reviews,
+        'student': student,
+        'review_timings': review_timings,
+        'm_2_reward': student.get_m1_sq(episode_end_time=T),
+    }
 
 
+# Sweeping q
 
-## Sweeping q
-
-def calc_q_capacity_iter(sim_opts, q, seeds=None, parallel=True, dynamic=True, max_events=None):
+def calc_q_capacity_iter_memorize(
+        scenario_opts, q_suggested, verbose=False,
+        seeds=None, parallel=True, max_events=None
+):
     if seeds is None:
-        seeds = range(10)
+        seeds = range(250, 270)
 
-    sim_opts = sim_opts.update({'q': q})
+    num_reviews = [
+        memorize_baseline(scenario_opts, q_max=q_suggested,
+                          seed=x, verbose=verbose)['num_reviews']
+        for x in seeds
+    ]
 
-    capacities = np.zeros(len(seeds), dtype=float)
-    if not parallel:
-        for idx, seed in enumerate(seeds):
-            m = sim_opts.create_manager_with_opt(seed)
-            if dynamic:
-                m.run_dynamic(max_events=max_events)
-            else:
-                m.run()
-            capacities[idx] = u_int_opt(m.state.get_dataframe(),
-                                        sim_opts=sim_opts)
-    else:
-        num_workers = min(len(seeds), mp.cpu_count())
-        with mp.Pool(num_workers) as pool:
-            for (idx, capacity) in \
-                enumerate(pool.imap(q_int_worker, [(sim_opts, x, dynamic, max_events)
-                                                   for x in seeds])):
-                capacities[idx] = capacity
+    return np.asarray(num_reviews)
+    # capacities = np.zeros(len(seeds), dtype=float)
+    # if not parallel:
+    #     for idx, seed in enumerate(seeds):
+    #         m = sim_opts.create_manager_with_opt(seed)
+    #         if dynamic:
+    #             m.run_dynamic(max_events=max_events)
+    #         else:
+    #             m.run()
+    #         capacities[idx] = u_int_opt(m.state.get_dataframe(),
+    #                                     sim_opts=sim_opts)
+    # else:
+    #     num_workers = min(len(seeds), mp.cpu_count())
+    #     with mp.Pool(num_workers) as pool:
+    #         for (idx, capacity) in \
+    #             enumerate(pool.imap(q_int_worker, [(sim_opts, x, dynamic, max_events)
+    #                                                for x in seeds])):
+    #             capacities[idx] = capacity
 
-    return capacities
-
+    # return capacities
 
 
 # There are so many ways this can go south. Particularly, if the user capacity
 # is much higher than the average of the wall of other followees.
-def sweep_memorize_q(sim_opts, capacity_cap, q_init, tol=1e-2,
+def sweep_memorize_q(scenario_opts, capacity_cap, q_init, tol=1e-2,
                      verbose=False, parallel=True, max_events=None,
                      max_iters=float('inf')):
 
@@ -1064,23 +1227,20 @@ def sweep_memorize_q(sim_opts, capacity_cap, q_init, tol=1e-2,
         return abs(new_capacity - capacity_cap) / capacity_cap < tol or \
             np.ceil(capacity_cap - 1) <= new_capacity <= np.ceil(capacity_cap + 1)
 
-    if q_init is None:
-        wall_mgr = sim_opts.create_manager_for_wall()
-        wall_mgr.run_dynamic()
-        r_t = RU.rank_of_src_in_df(wall_mgr.state.get_dataframe(), -1)
-        q_init = (4 * (r_t.iloc[-1].mean() ** 2) * (sim_opts.end_time) ** 2) / (np.pi * np.pi * (capacity_cap + 1) ** 4)
-        if verbose:
-            RU.logTime('q_init = {}'.format(q_init))
-
     # Step 1: Find the upper/lower bound by exponential increase/decrease
-    init_cap = calc_q_capacity_iter(sim_opts, q_init, dynamic=dynamic, parallel=parallel, max_events=max_events).mean()
+    init_cap = calc_q_capacity_iter_memorize(
+        scenario_opts,
+        q_init,
+        parallel=parallel,
+        max_events=max_events
+    ).mean()
 
     if terminate_cond(init_cap):
         return q_init
 
     if verbose:
         RU.logTime('Initial capacity = {}, target capacity = {}, q_init = {}'
-                .format(init_cap, capacity_cap, q_init))
+                   .format(init_cap, capacity_cap, q_init))
 
     q = q_init
     if init_cap < capacity_cap:
@@ -1088,9 +1248,13 @@ def sweep_memorize_q(sim_opts, capacity_cap, q_init, tol=1e-2,
         while True:
             iters += 1
             q_hi = q
-            q /= 2.0
+            q *= 2.0
             q_lo = q
-            capacity = calc_q_capacity_iter(sim_opts, q, dynamic=dynamic, parallel=parallel, max_events=max_events).mean()
+            capacity = calc_q_capacity_iter_memorize(
+                scenario_opts, q,
+                parallel=parallel,
+                max_events=max_events
+            ).mean()
             if verbose:
                 RU.logTime('q = {}, capacity = {}'.format(q, capacity))
             if terminate_cond(capacity):
@@ -1106,9 +1270,13 @@ def sweep_memorize_q(sim_opts, capacity_cap, q_init, tol=1e-2,
         while True:
             iters += 1
             q_lo = q
-            q *= 2.0
+            q /= 2.0
             q_hi = q
-            capacity = calc_q_capacity_iter(sim_opts, q, dynamic=dynamic, parallel=parallel, max_events=max_events).mean()
+            capacity = calc_q_capacity_iter_memorize(
+                scenario_opts, q,
+                parallel=parallel,
+                max_events=max_events
+            ).mean()
             if verbose:
                 RU.logTime('q = {}, capacity = {}'.format(q, capacity))
             # TODO: will break if capacity_cap is too low ~ 1 event.
@@ -1127,7 +1295,11 @@ def sweep_memorize_q(sim_opts, capacity_cap, q_init, tol=1e-2,
     # Step 2: Keep bisecting on 's' until we arrive at a close enough solution.
     while True:
         q = (q_hi + q_lo) / 2.0
-        new_capacity = calc_q_capacity_iter(sim_opts, q, dynamic=dynamic, parallel=parallel, max_events=max_events).mean()
+        new_capacity = calc_q_capacity_iter_memorize(
+            scenario_opts, q,
+            parallel=parallel,
+            max_events=max_events
+        ).mean()
 
         if verbose:
             RU.logTime('new_capacity = {}, q = {}'.format(new_capacity, q))
@@ -1142,5 +1314,3 @@ def sweep_memorize_q(sim_opts, capacity_cap, q_init, tol=1e-2,
 
     # Step 3: Return
     return q
-
-
