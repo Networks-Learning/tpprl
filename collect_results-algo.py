@@ -16,10 +16,11 @@ import multiprocessing as MP
 import redqueen.utils as RU
 import redqueen.opt_runs as OR
 import redqueen.opt_model as OM
-# import tpprl.read_data_utils as RDU
+import tpprl.read_data_utils as RDU
 import tpprl.exp_broadcaster as EB
 import tpprl.exp_sampler as ES
 import natsort
+from collections import defaultdict
 # import decorated_options as Deco
 
 
@@ -34,8 +35,8 @@ save_dir_regex = re.compile(r'train-save-user_idx-(\d*)')
 save_dir_glob = r'train-save-user_idx-*'
 user_data = None
 
-MAX_EVENTS = 20000
-MAX_ITERS = 50
+MAX_EVENTS = 8000
+MAX_ITERS = 500
 REWARD_STEPS = 1000
 
 
@@ -53,7 +54,7 @@ def worker_user(params):
     Uses only one core.
     """
     (user_idx, output_dir, test_batches, RQ_cap_adjust,
-     for_epoch, verbose, only_rl, algo_feed) = params
+     for_epoch, verbose, only_rl, algo_feed, algo_frac, merge_sinks) = params
 
     save_dir = os.path.join(output_dir, save_dir_tmpl.format(user_idx))
 
@@ -64,6 +65,11 @@ def worker_user(params):
         user_opt_dict = dill.load(f)
 
     one_user_data = user_data[user_idx]
+    if merge_sinks:
+        if verbose:
+            print('Merged sinks!')
+        one_user_data = RDU.merge_sinks(one_user_data)
+
     ret = {
         'user_idx': user_idx,
         'user_id': one_user_data['user_id'],
@@ -122,15 +128,16 @@ def worker_user(params):
     )
 
     sink_ids = one_user_data['sim_opts'].sink_ids
-    src_embed_map = EB.make_src_embed(eval_sim_opts)
-    src_ids = [src_id
-               for (src_id, x) in sorted(src_embed_map.items(),
-                                         key=lambda x: x[1])]
-
     if algo_feed:
         algo_c = user_opt_dict['algo_c']
-        algo_feed_seed = user_opt_dict['algo_feed_seed']
-        algo_feed_args = ES.make_prefs(sink_ids, src_ids, seed=algo_feed_seed)
+        lifetimes = defaultdict(lambda: (eval_sim_opts.end_time - window_start) / 10.)
+        # algo_feed_args = ES.make_prefs(sink_ids, src_ids, seed=algo_feed_seed,
+        #                                src_lifetime_dict=lifetimes)
+        algo_feed_args = ES.make_freq_prefs(
+            one_user_data=one_user_data,
+            sink_ids=sink_ids,
+            src_lifetime_dict=lifetimes
+        )
 
         rl_b_dict['algo_feed'] = algo_feed
         rl_b_dict['algo_feed_args'] = algo_feed_args
@@ -187,14 +194,17 @@ def worker_user(params):
         # Removing 'RQ_cap_adjust' because RQ systematically tweets more.
         q_RQ = RU.sweep_q(eval_sim_opts, capacity_cap=capacity_cap - RQ_cap_adjust,
                           verbose=verbose, q_init=q, parallel=False, max_events=MAX_EVENTS,
-                          max_iters=MAX_ITERS)
+                          max_iters=MAX_ITERS, only_tol=True, tol=0.1)
         ret['q_RQ'] = q_RQ
 
         # Run RedQueen.
         RQ_dfs = []
         RQ_events = []
         for idx in range(test_batches):
-            opt = OM.Opt(src_id=eval_sim_opts.src_id, seed=init_seed + idx, s=eval_sim_opts.s, q=q_RQ)
+            # Deliberately using eval_sim_opts.s, as it was used to calculate q_RQ.
+            # It seems to be initialized to constant (equal significance).
+            opt = OM.Opt(src_id=eval_sim_opts.src_id,
+                         s=eval_sim_opts.s, seed=init_seed + idx, q=q_RQ)
             mgr = eval_sim_opts.update({'q': q_RQ}).create_manager_with_broadcaster(opt)
             # mgr = eval_sim_opts.update({}).create_manager_with_opt(seed=init_seed + idx)
             mgr.state.time = window_start
@@ -213,7 +223,10 @@ def worker_user(params):
                 verbose=verbose,
                 q_init=1000.0,
                 max_events=MAX_EVENTS,
-                max_iters=MAX_ITERS
+                max_iters=MAX_ITERS,
+                tol=0.1,
+                only_tol=True,
+                t_min=window_start,
             )
             ret['q_RQ_algo'] = q_RQ_algo
 
@@ -221,8 +234,9 @@ def worker_user(params):
             RQ_algo_dfs = []
             RQ_algo_events = []
             for idx in range(test_batches):
-                opt = ES.OptAlgo(src_id=eval_sim_opts.src_id, seed=init_seed + idx,
-                                 s=eval_sim_opts.s, q=q_RQ_algo,
+                # Deliberately not using eval_sim_opts.s, it seems to be initialized to
+                # something strange.
+                opt = ES.OptAlgo(src_id=eval_sim_opts.src_id, seed=init_seed + idx, q=q_RQ_algo,
                                  algo_feed_args=algo_feed_args, algo_c=algo_c)
                 mgr = eval_sim_opts.update({'q': q_RQ_algo}).create_manager_with_broadcaster(opt)
                 # mgr = eval_sim_opts.update({}).create_manager_with_opt(seed=init_seed + idx)
@@ -286,7 +300,7 @@ def worker_user(params):
     if only_rl:
         all_settings = [('RL', rl_dfs)]
     else:
-        all_settings = [('RL', rl_dfs), ('RQ', RQ_dfs), ('poisson', poisson_dfs), ('karimi', karimi_dfs)]
+        all_settings = [('RL', rl_dfs), ('RQ', RQ_dfs), ('poisson', poisson_dfs), ('karimi', karimi_dfs), ('RQ_algo', RQ_algo_dfs)]
 
     metric_name = 'num_tweets'
     for type, dfs in all_settings:
@@ -385,16 +399,20 @@ def worker_user(params):
 @click.option('--verbose/--no-verbose', 'verbose', help='Verbose mode.', default=False)
 @click.option('--only-rl/--no-only-rl', 'only_rl', help='Calculate only RL stats.', default=False)
 @click.option('--algo-feed/--no-algo-feed', 'algo_feed', help='Consider algorithmic feeds?', default=False)
-def run(output_dir, save_csv, tweeters_data_file, batches, force, RQ_cap_adjust, for_epoch, parallel, verbose, only_rl, algo_feed):
+@click.option('--algo-frac', 'algo_frac', help='What fraction of the window is the lifetime of the priority queue?', default=0.1)
+@click.option('--merge-sinks', 'merge_sinks', help='Whether to merge the sinks or not.', default=True)
+def run(output_dir, save_csv, tweeters_data_file, batches, force, RQ_cap_adjust, for_epoch,
+        parallel, verbose, only_rl, algo_feed, algo_frac, merge_sinks):
     """Read all OUTPUT_DIR and compile the results for all users and save them in SAVE_CSV.
     The user data is read from IN_DATA_FILE and `batches` number of batches are executed.
     """
     cmd(output_dir, save_csv, tweeters_data_file, batches, force,
-        RQ_cap_adjust, for_epoch, parallel, verbose, only_rl, algo_feed)
+        RQ_cap_adjust, for_epoch, parallel, verbose, only_rl, algo_feed,
+        algo_frac, merge_sinks)
 
 
 def cmd(output_dir, save_csv, tweeters_data_file, batches, force, RQ_cap_adjust,
-        for_epoch, parallel, verbose, only_rl, algo_feed):
+        for_epoch, parallel, verbose, only_rl, algo_feed, algo_frac, merge_sinks):
 
     if os.path.exists(save_csv) and not force:
         print('File {} exists and --force was not supplied.'.format(save_csv))
@@ -409,20 +427,26 @@ def cmd(output_dir, save_csv, tweeters_data_file, batches, force, RQ_cap_adjust,
 
     save_dict = []
     all_params = [(x, output_dir, batches, RQ_cap_adjust,
-                   for_epoch, verbose, only_rl, algo_feed)
+                   for_epoch, verbose, only_rl, algo_feed, algo_frac,
+                   merge_sinks)
                   for x in user_idxes
                   for for_epoch in all_epochs]
 
-    if parallel:
-        with MP.Pool() as pool:
-            save_dict += list(pool.imap_unordered(worker_user, all_params))
-    else:
-        save_dict += [worker_user(param) for param in all_params]
+    try:
+        if parallel:
+            with MP.Pool() as pool:
+                for x in pool.imap_unordered(worker_user, all_params):
+                    save_dict.append(x)
+        else:
+            for param in all_params:
+                save_dict.append(worker_user(param))
+    finally:
+        # Save something even if we have to kill the simulation at some point.
+        save_df = pd.DataFrame(save_dict)
 
-    save_df = pd.DataFrame(save_dict)
-
-    os.makedirs(os.path.dirname(save_csv), exist_ok=True)
-    save_df.to_csv(save_csv, index=False)
+        os.makedirs(os.path.dirname(save_csv), exist_ok=True)
+        save_df.to_csv(save_csv, index=False)
+        print('Saved {} users.'.format(len(save_dict)))
 
 
 if __name__ == '__main__':
