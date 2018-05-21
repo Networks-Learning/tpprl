@@ -17,15 +17,17 @@ Needed for the `Karimi` baseline:
 
  - `pip install git+https://github.com/Networks-Learning/broadcast_ref.git@master#egg=broadcast_ref`
 
-We could not find an implementation for the MEMORIZE 
+We obtained the parameters from the item difficulties via personal correspondence with the authors of MEMORIZE.
 
 ## Scripts
 
 Running experiments:
+
  - `sbatch/exp_run.py`: Running Smart Broadcasting experiments on a SLURM cluster.
  - `rq_compare-algo.py`: Running one experiment for Smart Broadcastering.
  - `compare_results-algo.py`: Reads output produced by `rq_compare-algo.py` and compares it with baselines.
  - TODO: Scripts for running MEMORIZE training.
 
+## Reproducing plots
 
-
+TODO
