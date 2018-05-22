@@ -5,7 +5,7 @@ set -eo pipefail
 source conda.sh
 source activate tf-cpu
 
-cd ${HOME}/prog/work/broadcast-rl/;
+cd ${HOME}/prog/work/tpprl/;
 
 in_file=$1
 user_idx=$2
@@ -18,4 +18,4 @@ save_every=$8
 algo_feed=$9
 algo_approx=${10}
 
-python rq-compare-algo.py "${in_file}" "${user_idx}" "${out_dir}" --N $N --q $q --reward r_2_reward --until ${until} --epochs ${epochs} --restore --only-cpu --save-every $save_every $algo_feed $algo_approx
+python train-broadcasting.py "${in_file}" "${user_idx}" "${out_dir}" --N $N --q $q --reward r_2_reward --until ${until} --epochs ${epochs} --restore --only-cpu --save-every $save_every $algo_feed $algo_approx

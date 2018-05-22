@@ -1,4 +1,8 @@
 #!/usr/bin/env python
+import warnings
+# This removes the annoying warning from h5py
+warnings.simplefilter(action='ignore', category=FutureWarning)
+
 import click
 import dill
 import os
@@ -33,8 +37,8 @@ def log_eval(u_data):
 @click.option('--q', help='Weight of the regularizer.', default=100.0, show_default=True)
 @click.option('--gpu', help='Which GPU device to use.', default='/gpu:0', show_default=True)  # Is also effected by masking via CUDA_VISIBLE_DEVICES.
 @click.option('--hidden-dims', 'hidden_dims', help='How many hidden dimensions to use.', default=8, show_default=True)
-@click.option('--epochs', 'epochs', help='How many batches to train for.', default=200, show_default=True)
-@click.option('--num-iters', 'num_iters', help='How many batches to train for.', default=20, show_default=True)
+@click.option('--epochs', 'epochs', help='How many epochs to train for.', default=200, show_default=True)
+@click.option('--num-iters', 'num_iters', help='How many iterations in each epoch.', default=20, show_default=True)
 @click.option('--save-every', 'save_every', help='How many epochs to save a copy to disk.', default=5, show_default=True)
 @click.option('--only-cpu/--no-only-cpu', 'only_cpu', help='Whether to use GPUs at all.', default=False, show_default=True)
 @click.option('--with-summaries/--no-with-summaries', 'with_summaries', help='Whether to produce summaries in output_dir.', default=False, show_default=True)
