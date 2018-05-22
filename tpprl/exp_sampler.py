@@ -4,8 +4,6 @@ import decorated_options as Deco
 import numpy as np
 import redqueen.opt_model as OM
 import redqueen.utils as RU
-import multiprocessing as MP
-from collections import defaultdict
 
 
 class CDFSampler:
