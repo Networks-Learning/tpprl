@@ -99,7 +99,7 @@ def run(all_user_data_file, user_idx, output_dir, q, N, gpu, reward_kind, K, sho
         decay_steps=decay_steps,
         num_followers=num_followers,
         with_advantage=with_advantage,
-        summary_dir=os.path.join(output_dir, 'train-summary-user_idx-{}'.format(user_idx)),
+        summary_dir=os.path.join(output_dir, 'train-summary-user_idx-{}/train'.format(user_idx)),
         save_dir=save_dir,
     )
 

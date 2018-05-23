@@ -775,6 +775,10 @@ class ExpRecurrentTeacher:
         finally:
             if pool is not None:
                 pool.close()
+
+            if with_summaries:
+                train_writer.flush()
+
             print('Saving model!')
             self.saver.save(self.sess, chkpt_file, global_step=self.global_step,)
 

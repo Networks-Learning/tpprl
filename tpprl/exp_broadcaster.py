@@ -962,6 +962,9 @@ class ExpRecurrentTrainer:
             # Ready for the next iter_idx.
             seed_start = seed_end
 
+        if with_summaries:
+            train_writer.flush()
+
         chkpt_file = os.path.join(self.save_dir, 'tpprl.ckpt')
         self.saver.save(self.sess, chkpt_file, global_step=self.global_step,)
 
@@ -1285,6 +1288,9 @@ def train_real_data(trainer, N, one_user_data, num_iters, init_seed, with_summar
 
         # Ready for the next iter_idx.
         seed_start = seed_end
+
+    if with_summaries:
+        train_writer.flush()
 
     chkpt_file = os.path.join(trainer.save_dir, 'tpprl.ckpt')
     trainer.saver.save(trainer.sess, chkpt_file, global_step=trainer.global_step,)
@@ -1626,9 +1632,15 @@ def train_real_data_algo(
                 print(_now(), "Saving model!")
                 trainer.saver.save(trainer.sess, chkpt_file, global_step=trainer.global_step,)
 
+            if with_summaries:
+                train_writer.flush()
+
     finally:
         if pool is not None:
             pool.close()
+
+        if with_summaries:
+            train_writer.flush()
 
         print(_now(), "Saving model!")
         trainer.saver.save(trainer.sess, chkpt_file, global_step=trainer.global_step,)
