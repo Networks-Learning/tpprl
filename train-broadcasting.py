@@ -79,6 +79,7 @@ def run(all_user_data_file, user_idx, output_dir, q, N, gpu, reward_kind, K, sho
     num_other_broadcasters = len(sim_opts.other_sources)
     num_followers = len(sim_opts.sink_ids)
 
+    # These parameters can also be made arguments, if needed.
     max_events = 50000
     reward_time_steps = 1000
     decay_steps = 1
