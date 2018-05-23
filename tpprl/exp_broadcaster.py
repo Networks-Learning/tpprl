@@ -200,7 +200,7 @@ def mk_def_exp_recurrent_trainer_opts(num_other_broadcasters, hidden_dims,
         decay_q_rate=0.0,
 
         # Whether or not to use the advantage formulation.
-        with_advantage=True,
+        with_baseline=True,
     )
 
     return def_exp_recurrent_trainer_opts.set(**kwargs)
@@ -220,7 +220,7 @@ class ExpRecurrentTrainer:
                  sess, sim_opts, scope, t_min, batch_size, max_events,
                  learning_rate, clip_norm, with_dynamic_rnn,
                  summary_dir, save_dir, decay_steps, decay_rate, momentum,
-                 device_cpu, device_gpu, only_cpu, with_advantage,
+                 device_cpu, device_gpu, only_cpu, with_baseline,
                  num_followers, decay_q_rate,
                  reward_top_k, reward_kind,
                  reward_episode_target, reward_target_weight):
@@ -570,12 +570,12 @@ class ExpRecurrentTrainer:
         #                                for y in tf.split(self.loss, self.batch_size)]
         #                            for x in self.all_tf_vars}
 
-        #         avg_reward = tf.reduce_mean(self.loss, axis=0) + tf.reduce_mean(self.tf_batch_rewards, axis=0) if with_advantage else 0.0
+        #         avg_baseline = tf.reduce_mean(self.loss, axis=0) + tf.reduce_mean(self.tf_batch_rewards, axis=0) if with_baseline else 0.0
 
         #         # Attempt to calculate the gradient within TensorFlow for the entire
         #         # batch, without moving to the CPU.
         #         self.tower_gradients = [
-        #             [(((tf.gather(self.tf_batch_rewards, idx) + tf.gather(self.loss, idx) - avg_reward) * self.LL_grads[x][idx][0] +
+        #             [(((tf.gather(self.tf_batch_rewards, idx) + tf.gather(self.loss, idx) - avg_baseline) * self.LL_grads[x][idx][0] +
         #                self.loss_grads[x][idx][0]),
         #               x) for x in self.all_tf_vars]
         #             for idx in range(self.batch_size)
@@ -601,12 +601,11 @@ class ExpRecurrentTrainer:
                 self.avg_gradient_stack = []
 
                 # TODO: Can we calculate natural gradients here easily?
-                # TODO: Should we take into account the loss as well as the reward?
                 # This is one of the baseline rewards we can calculate.
-                avg_reward = tf.reduce_mean(self.tf_batch_rewards, axis=0) + tf.reduce_mean(self.loss_stack, axis=0) if with_advantage else 0.0
+                avg_baseline = tf.reduce_mean(self.tf_batch_rewards, axis=0) + tf.reduce_mean(self.loss_stack, axis=0) if with_baseline else 0.0
 
                 # Removing the average reward converts this coefficient into the advantage function.
-                coef = tf.squeeze(self.tf_batch_rewards, axis=-1) + self.loss_stack - avg_reward
+                coef = tf.squeeze(self.tf_batch_rewards, axis=-1) + self.loss_stack - avg_baseline
 
                 for x, y in zip(self.all_mini_vars, self.all_tf_vars):
                     LL_grad = self.LL_grad_stacked[x][0]
@@ -1429,12 +1428,12 @@ def make_NN_for(sim_opts, run_num, trainer_opts=None):
         max_events = 20000
         decay_steps = 10   # Instead of 100.
         reward_kind = R_2_REWARD
-        with_advantage = True
+        with_baseline = True
 
         trainer_opts = mk_def_exp_recurrent_trainer_opts(seed=42, hidden_dims=hidden_dims, num_other_broadcasters=num_other_broadcasters,
                                                          only_cpu=only_cpu, max_events=max_events, reward_top_k=1, reward_kind=reward_kind,
                                                          batch_size=batch_size, decay_steps=decay_steps, num_followers=num_followers,
-                                                         with_advantage=with_advantage,
+                                                         with_baseline=with_baseline,
                                                          summary_dir='./tpprl.summary-real-data/train-{}/'.format(run_num),
                                                          save_dir='./tpprl.save-real-data/'.format(sim_opts.q))
     config = tf.ConfigProto(allow_soft_placement=True)

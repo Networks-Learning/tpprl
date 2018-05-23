@@ -30,7 +30,7 @@ def log_eval(u_data):
 
 
 @click.command()
-@click.argument('all_user_data_file')
+@click.argument('all_user_data_file', type=click.Path(exists=True))
 @click.argument('user_idx', type=int)
 @click.argument('output_dir')
 @click.option('--N', 'N', help='How many posts to consider in a window.', default=300, show_default=True)
@@ -82,7 +82,7 @@ def run(all_user_data_file, user_idx, output_dir, q, N, gpu, reward_kind, K, sho
     max_events = 50000
     reward_time_steps = 1000
     decay_steps = 1
-    with_advantage = True
+    with_baseline = True
     batch_size = 16
 
     trainer_opts_seed = 42
@@ -98,7 +98,7 @@ def run(all_user_data_file, user_idx, output_dir, q, N, gpu, reward_kind, K, sho
         batch_size=batch_size,
         decay_steps=decay_steps,
         num_followers=num_followers,
-        with_advantage=with_advantage,
+        with_baseline=with_baseline,
         summary_dir=os.path.join(output_dir, 'train-summary-user_idx-{}/train'.format(user_idx)),
         save_dir=save_dir,
     )

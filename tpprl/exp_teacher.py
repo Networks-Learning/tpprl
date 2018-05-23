@@ -273,7 +273,7 @@ def mk_def_teacher_opts(hidden_dims, num_items,
         decay_q_rate=0.0,
 
         # Whether or not to use the advantage formulation.
-        with_advantage=True,
+        with_baseline=True,
 
         q=0.0005,
         q_entropy=0.01,
@@ -290,7 +290,7 @@ class ExpRecurrentTeacher:
                  sess, scope, batch_size, max_events, q, q_entropy,
                  learning_bump, learning_rate, clip_norm, t_min, T,
                  summary_dir, save_dir, decay_steps, decay_rate, momentum,
-                 device_cpu, device_gpu, only_cpu, with_advantage,
+                 device_cpu, device_gpu, only_cpu, with_baseline,
                  num_items, decay_q_rate, scenario_opts, tau):
         """Initialize the trainer with the policy parameters."""
 
@@ -549,10 +549,10 @@ class ExpRecurrentTeacher:
                 # TODO: Can we calculate natural gradients here easily?
                 # TODO: Should we take into account the loss as well as the reward?
                 # This is one of the baseline rewards we can calculate.
-                avg_reward = tf.reduce_mean(self.tf_batch_rewards, axis=0) + tf.reduce_mean(self.loss_stack, axis=0) if with_advantage else 0.0
+                avg_baseline = tf.reduce_mean(self.tf_batch_rewards, axis=0) + tf.reduce_mean(self.loss_stack, axis=0) if with_baseline else 0.0
 
                 # Removing the average reward converts this coefficient into the advantage function.
-                coef = tf.squeeze(self.tf_batch_rewards, axis=-1) + self.loss_stack - avg_reward
+                coef = tf.squeeze(self.tf_batch_rewards, axis=-1) + self.loss_stack - avg_baseline
 
                 for x, y in zip(self.all_mini_vars, self.all_tf_vars):
                     LL_grad = self.LL_grad_stacked[x][0]
