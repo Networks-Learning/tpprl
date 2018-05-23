@@ -547,7 +547,6 @@ class ExpRecurrentTeacher:
                 self.avg_gradient_stack = []
 
                 # TODO: Can we calculate natural gradients here easily?
-                # TODO: Should we take into account the loss as well as the reward?
                 # This is one of the baseline rewards we can calculate.
                 avg_baseline = tf.reduce_mean(self.tf_batch_rewards, axis=0) + tf.reduce_mean(self.loss_stack, axis=0) if with_baseline else 0.0
 
@@ -1283,7 +1282,8 @@ def sweep_memorize_q(scenario_opts, capacity_cap, q_init, tol=1e-2,
             ).mean()
             if verbose:
                 RU.logTime('q = {}, capacity = {}'.format(q, capacity))
-            # TODO: will break if capacity_cap is too low ~ 1 event.
+            # Will break if capacity_cap is too low ~ 1 event,
+            # unless only_tol is True.
             if terminate_cond(capacity):
                 return q
             if capacity <= capacity_cap:
