@@ -272,7 +272,7 @@ def mk_def_teacher_opts(hidden_dims, num_items,
 
         decay_q_rate=0.0,
 
-        # Whether or not to use the advantage formulation.
+        # Whether or not to deduct the baseline.
         with_baseline=True,
 
         q=0.0005,
@@ -547,21 +547,14 @@ class ExpRecurrentTeacher:
                 self.avg_gradient_stack = []
 
                 # TODO: Can we calculate natural gradients here easily?
-                # This is one of the baseline rewards we can calculate.
                 avg_baseline = tf.reduce_mean(self.tf_batch_rewards, axis=0) + tf.reduce_mean(self.loss_stack, axis=0) if with_baseline else 0.0
 
-                # Removing the average reward converts this coefficient into the advantage function.
+                # Removing the average reward + loss is not optimal baseline,
+                # but still reduces variance significantly.
                 coef = tf.squeeze(self.tf_batch_rewards, axis=-1) + self.loss_stack - avg_baseline
 
                 for x, y in zip(self.all_mini_vars, self.all_tf_vars):
                     LL_grad = self.LL_grad_stacked[x][0]
-
-                    # This is needed if the loss does not depend on certain parameters.
-                    # if x == self.Vy_mini:
-                    #     loss_grad = 0
-                    # else:
-                    #     loss_grad = self.loss_grad_stacked[x][0]
-
                     loss_grad = self.loss_grad_stacked[x][0]
 
                     dim = len(LL_grad.get_shape())

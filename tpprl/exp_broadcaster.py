@@ -199,7 +199,7 @@ def mk_def_exp_recurrent_trainer_opts(num_other_broadcasters, hidden_dims,
 
         decay_q_rate=0.0,
 
-        # Whether or not to use the advantage formulation.
+        # Whether or not to deduct the baseline.
         with_baseline=True,
     )
 
@@ -601,10 +601,10 @@ class ExpRecurrentTrainer:
                 self.avg_gradient_stack = []
 
                 # TODO: Can we calculate natural gradients here easily?
-                # This is one of the baseline rewards we can calculate.
                 avg_baseline = tf.reduce_mean(self.tf_batch_rewards, axis=0) + tf.reduce_mean(self.loss_stack, axis=0) if with_baseline else 0.0
 
-                # Removing the average reward converts this coefficient into the advantage function.
+                # Removing the average reward + loss is not optimal baseline,
+                # but still reduces variance significantly.
                 coef = tf.squeeze(self.tf_batch_rewards, axis=-1) + self.loss_stack - avg_baseline
 
                 for x, y in zip(self.all_mini_vars, self.all_tf_vars):
