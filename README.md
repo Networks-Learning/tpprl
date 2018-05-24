@@ -19,7 +19,7 @@ Needed for the `Karimi` baseline:
 
 We obtained the parameters from the item difficulties via personal correspondence with the authors of MEMORIZE.
 
-## Scripts
+## Experiment execution
 
 Running experiments:
 
@@ -36,8 +36,8 @@ This script is used for running an experiment for one-user in the Smart Broadcas
 It can be executed as:
 
     export USER_IDX=218   # Which user to train the model for.
-    mkdir -p output-save/
-    python train-broadcastring ./data/twitter_data.dill ${USER_IDX} ./output-dir \
+    mkdir -p output-smart-broadcasting/
+    python train-broadcastring ./data/twitter_data.dill ${USER_IDX} ./output-smart-broadcasting \
       --reward r_2_reward --q 100.0 --algo-feed --save-every 100 \
       --no-merge-sinks
 
@@ -49,10 +49,36 @@ The output will be saved in files `./output-dir/train-save-user_idx-${USER_IDX}`
 
 Reads output produced by `train-broadcasting.py` and compares it against baselines and saves the results in a CSV file ready for analysis/plotting.
 
+    python analyze-broadcasting.py ./data/twitter_data.dill ./output-smart-broadcasting/ broadcasting-analysis.csv  \
+            --no-merge-sinks --algo-feed
+
+
 ### `train-teaching.py`
 
-TODO: Scripts for running MEMORIZE training.
+This script is used for running the Spaced Repetition experiment:
+
+    mkdir -p output-spaced-repetition;
+    python train-teaching.py ./data/initial-difficulty.csv 0.049 0.0052 ./output-spaced-repetition \
+        --q 0.0001 --q-entropy 0.005
+
+
+If the training gets stuck on 0 reward, then training an initial version `--with-recall-probs` as reward instead of binary reward, and/or increasing the `batch_size` may help.
+
 
 ## Reproducing figures
 
-TODO
+### Smart broadcasting
+
+Running:
+
+    python plot-smart-broadcasting.py broadcasting-analysis.csv
+
+will reproduce the plots in the paper in the `./output-plots` folder.
+
+### Spaced repetition
+
+Running:
+
+    python analyze-spaced-repetition.py ./data/initial_difficulty.csv 0.049 0.0052 ./output-spaced-repetition
+
+Will re-produce the plots in the paper in the `./output-plots` folder.
