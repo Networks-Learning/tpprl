@@ -400,7 +400,7 @@ def worker_user(params):
 @click.option('--only-rl/--no-only-rl', 'only_rl', help='Calculate only RL stats.', default=False, show_default=True)
 @click.option('--algo-feed/--no-algo-feed', 'algo_feed', help='Consider algorithmic feeds?', default=False, show_default=True)
 @click.option('--algo-frac', 'algo_frac', help='What fraction of the window is the lifetime of the priority queue?', default=0.1, show_default=True)
-@click.option('--merge-sinks', 'merge_sinks', help='Whether to merge the sinks or not.', default=True, show_default=True)
+@click.option('--merge-sinks/--no-merge-sinks', 'merge_sinks', help='Whether to merge the sinks or not.', default=True, show_default=True)
 def run(output_dir, save_csv, tweeters_data_file, batches, force, RQ_cap_adjust, for_epoch,
         parallel, verbose, only_rl, algo_feed, algo_frac, merge_sinks):
     """Read all OUTPUT_DIR and compile the results for all users and save them in SAVE_CSV.
@@ -444,7 +444,10 @@ def cmd(output_dir, save_csv, tweeters_data_file, batches, force, RQ_cap_adjust,
         # Save something even if we have to kill the simulation at some point.
         save_df = pd.DataFrame(save_dict)
 
-        os.makedirs(os.path.dirname(save_csv), exist_ok=True)
+        save_csv_dir = os.path.dirname(save_csv)
+        if save_csv_dir != '':
+            os.makedirs(save_csv_dir, exist_ok=True)
+
         save_df.to_csv(save_csv, index=False)
         print('Saved {} users.'.format(len(save_dict)))
 
