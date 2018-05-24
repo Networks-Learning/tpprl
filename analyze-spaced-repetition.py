@@ -15,14 +15,8 @@ sns.despine()
 import matplotlib.pyplot as plt
 
 import click
-import pandas as pd
 import os
-import glob
-import re
 import numpy as np
-import sys
-import dill
-import multiprocessing as MP
 import tpprl.exp_teacher as ET
 from tpprl.utils import _now
 import tensorflow as tf
@@ -63,19 +57,22 @@ def cmd(initial_difficulty_csv, alpha, beta, save_dir, T, tau, only_cpu, batches
     teacher_opts = ET.mk_def_teacher_opts(
         num_items=num_items,
         hidden_dims=8,
-        learning_rate=0.02,
-        decay_rate=0.02,
-        summary_dir=summary_dir,
         save_dir=save_dir,
-        batch_size=32,
         only_cpu=only_cpu,
         T=T,
         tau=tau,
+        scenario_opts=scenario_opts,
+
+        # The values here do not matter because we will not be training
+        # the NN here.
+        summary_dir=summary_dir,
+        learning_rate=0.02,
+        decay_rate=0.02,
+        batch_size=32,
         q=0.0001,
         q_entropy=0.002,
         learning_bump=1.0,
         decay_steps=10,
-        scenario_opts=scenario_opts
     )
 
     config = tf.ConfigProto(
