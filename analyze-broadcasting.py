@@ -300,7 +300,11 @@ def worker_user(params):
     if only_rl:
         all_settings = [('RL', rl_dfs)]
     else:
-        all_settings = [('RL', rl_dfs), ('RQ', RQ_dfs), ('poisson', poisson_dfs), ('karimi', karimi_dfs), ('RQ_algo', RQ_algo_dfs)]
+        all_settings = [('RL', rl_dfs), ('RQ', RQ_dfs), ('poisson', poisson_dfs),
+                        ('karimi', karimi_dfs)]
+
+        if algo_feed:
+            all_settings += [('RQ_algo', RQ_algo_dfs)]
 
     metric_name = 'num_tweets'
     for type, dfs in all_settings:
@@ -326,8 +330,10 @@ def worker_user(params):
         if only_rl:
             all_settings = [('RL', rl_events)]
         else:
-            all_settings = [('RL', rl_events), ('RQ', RQ_events), ('RQ_algo', RQ_algo_events),
+            all_settings = [('RL', rl_events), ('RQ', RQ_events),
                             ('poisson', poisson_events), ('karimi', karimi_events)]
+            if algo_feed:
+                all_settings += [('RQ_algo', RQ_algo_events)]
 
         for type, all_events in all_settings:
             r_2_algo = []
