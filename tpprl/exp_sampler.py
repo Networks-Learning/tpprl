@@ -735,14 +735,6 @@ def sweep_q_algo(sim_opts, capacity_cap, algo_feed_args, algo_c, t_min,
         return abs(new_capacity - capacity_cap) / capacity_cap < tol or \
             (not only_tol and np.ceil(capacity_cap - 1) <= new_capacity <= np.ceil(capacity_cap + 1))
 
-    # if q_init is None:
-    #     wall_mgr = sim_opts.create_manager_for_wall()
-    #     wall_mgr.run_dynamic()
-    #     r_t = rank_of_src_in_df(wall_mgr.state.get_dataframe(), -1)
-    #     q_init = (4 * (r_t.iloc[-1].mean() ** 2) * (sim_opts.end_time) ** 2) / (np.pi * np.pi * (capacity_cap + 1) ** 4)
-    #     if verbose:
-    #         logTime('q_init = {}'.format(q_init))
-
     # Step 1: Find the upper/lower bound by exponential increase/decrease
     init_cap = calc_q_capacity_iter_algo(
         sim_opts=sim_opts, q=q_init, algo_feed_args=algo_feed_args,

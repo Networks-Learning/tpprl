@@ -1189,29 +1189,8 @@ def calc_q_capacity_iter_memorize(
     ]
 
     return np.asarray(num_reviews)
-    # capacities = np.zeros(len(seeds), dtype=float)
-    # if not parallel:
-    #     for idx, seed in enumerate(seeds):
-    #         m = sim_opts.create_manager_with_opt(seed)
-    #         if dynamic:
-    #             m.run_dynamic(max_events=max_events)
-    #         else:
-    #             m.run()
-    #         capacities[idx] = u_int_opt(m.state.get_dataframe(),
-    #                                     sim_opts=sim_opts)
-    # else:
-    #     num_workers = min(len(seeds), mp.cpu_count())
-    #     with mp.Pool(num_workers) as pool:
-    #         for (idx, capacity) in \
-    #             enumerate(pool.imap(q_int_worker, [(sim_opts, x, dynamic, max_events)
-    #                                                for x in seeds])):
-    #             capacities[idx] = capacity
-
-    # return capacities
 
 
-# There are so many ways this can go south. Particularly, if the user capacity
-# is much higher than the average of the wall of other followees.
 def sweep_memorize_q(scenario_opts, capacity_cap, q_init, tol=1e-2,
                      verbose=False, parallel=True, max_events=None,
                      max_iters=float('inf')):
