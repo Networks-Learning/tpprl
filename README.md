@@ -84,4 +84,4 @@ Running:
 
     python analyze-spaced-repetition.py ./data/initial_difficulty.csv 0.049 0.0052 ./output-spaced-repetition
 
-Will re-produce the plots in the paper in the `./output-plots` folder.
+will re-produce the plots in the paper in the `./output-plots` folder.
