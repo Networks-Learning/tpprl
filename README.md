@@ -1,6 +1,9 @@
 # Deep Reinforcement Learning of Marked Temporal Point Processes
 
-This is the code produced as part of the paper "Deep Reinforcement Learning of Marked Temporal Point Processes".
+This is the code produced as part of the paper _Deep Reinforcement Learning of Marked Temporal Point Processes_ 
+
+> "Deep Reinforcement Learning of Marked Temporal Point Processes"
+> Utkarsh Upadhyay, Abir De, Manuel Gomez-Rodriguez. [arXiv:1805.09360](https://arxiv.org/abs/1805.09360), 2018.
 
 ## Packages needed
 
