@@ -201,6 +201,8 @@ def mk_def_exp_recurrent_trainer_opts(num_other_broadcasters, hidden_dims,
 
         # Whether or not to deduct the baseline.
         with_baseline=True,
+
+        set_wt_zero=False,
     )
 
     return def_exp_recurrent_trainer_opts.set(**kwargs)
@@ -223,7 +225,8 @@ class ExpRecurrentTrainer:
                  device_cpu, device_gpu, only_cpu, with_baseline,
                  num_followers, decay_q_rate,
                  reward_top_k, reward_kind,
-                 reward_episode_target, reward_target_weight):
+                 reward_episode_target, reward_target_weight,
+                 set_wt_zero):
         """Initialize the trainer with the policy parameters."""
 
         self.reward_top_k = reward_top_k
@@ -231,6 +234,7 @@ class ExpRecurrentTrainer:
         self.reward_episode_target = reward_episode_target
         self.reward_target_weight = reward_target_weight
         self.decay_q_rate = decay_q_rate
+        self.set_wt_zero = set_wt_zero
 
         self.t_min = t_min
         self.t_max = sim_opts.end_time
@@ -312,15 +316,10 @@ class ExpRecurrentTrainer:
                                                  initializer=tf.constant_initializer(bt))
                     self.tf_vt = tf.get_variable(name='vt', shape=vt.shape,
                                                  initializer=tf.constant_initializer(vt))
+
+                    wt_init = 0.0 if set_wt_zero else wt
                     self.tf_wt = tf.get_variable(name='wt', shape=wt.shape,
-                                                 initializer=tf.constant_initializer(wt))
-                # self.tf_t_delta = tf.placeholder(name='t_delta', shape=1, dtype=self.tf_dtype)
-                # self.tf_u_t = tf.exp(
-                #     tf.tensordot(self.tf_vt, self.tf_h, axes=1) +
-                #     self.tf_t_delta * self.tf_wt +
-                #     self.tf_bt,
-                #     name='u_t'
-                # )
+                                                 initializer=tf.constant_initializer(wt_init))
 
             # Create a large dynamic_rnn kind of network which can calculate
             # the gradients for a given given batch of simulations.
@@ -347,20 +346,10 @@ class ExpRecurrentTrainer:
                 # Inferred batch size
                 inf_batch_size = tf.shape(self.tf_batch_b_idxes)[0]
 
-                self.tf_batch_init_h = tf_batch_h_t = tf.zeros(name='init_h',
-                                                               shape=(inf_batch_size, self.num_hidden_states),
-                                                               dtype=self.tf_dtype)
-
-                # t_0 = tf.zeros(name='event_time', shape=(inf_batch_size,), dtype=self.tf_dtype)
-
-                # def batch_u_theta(batch_t_deltas):
-                #     return tf.exp(
-                #         tf.matmul(tf_batch_h_t, self.tf_vt) +
-                #         self.tf_wt * tf.expand_dims(batch_t_deltas, 1) +
-                #         self.tf_bt
-                #     )
-
-                # assert with_dynamic_rnn, "The non-dynamic-RNN path has been removed."
+                self.tf_batch_init_h = tf.zeros(name='init_h',
+                                                shape=(inf_batch_size,
+                                                       self.num_hidden_states),
+                                                dtype=self.tf_dtype)
 
                 # # Un-stacked version (for ease of debugging)
 
@@ -432,7 +421,8 @@ class ExpRecurrentTrainer:
                             Wm=self.Wm_mini, Wr=self.Wr_mini,
                             Wh=self.Wh_mini, Wt=self.Wt_mini,
                             Bh=self.Bh_mini, wt=self.wt_mini,
-                            vt=self.vt_mini, bt=self.bt_mini
+                            vt=self.vt_mini, bt=self.bt_mini,
+                            assume_wt_zero=self.set_wt_zero,
                         )
 
                         ((self.h_states_stack, LL_log_terms_stack, LL_int_terms_stack, loss_terms_stack), tf_batch_h_t_mini) = tf.nn.dynamic_rnn(
@@ -601,7 +591,11 @@ class ExpRecurrentTrainer:
                 self.avg_gradient_stack = []
 
                 # TODO: Can we calculate natural gradients here easily?
-                avg_baseline = tf.reduce_mean(self.tf_batch_rewards, axis=0) + tf.reduce_mean(self.loss_stack, axis=0) if with_baseline else 0.0
+                if with_baseline:
+                    avg_baseline = (tf.reduce_mean(self.tf_batch_rewards, axis=0) +
+                                    tf.reduce_mean(self.loss_stack, axis=0))
+                else:
+                    avg_baseline = 0.0
 
                 # Removing the average reward + loss is not optimal baseline,
                 # but still reduces variance significantly.
@@ -610,6 +604,10 @@ class ExpRecurrentTrainer:
                 for x, y in zip(self.all_mini_vars, self.all_tf_vars):
                     LL_grad = self.LL_grad_stacked[x][0]
                     loss_grad = self.loss_grad_stacked[x][0]
+
+                    if self.set_wt_zero and y == self.tf_wt:
+                        self.avg_gradient_stack.append(([0.0], y))
+                        continue
 
                     dim = len(LL_grad.get_shape())
                     if dim == 1:

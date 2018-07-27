@@ -204,11 +204,12 @@ class TPPRExpCellStacked(tf.contrib.rnn.RNNCell):
 
     def __init__(self, hidden_state_size, output_size, src_id, tf_dtype,
                  Wm, Wr, Wh, Wt, Bh,
-                 wt, vt, bt):
+                 wt, vt, bt, assume_wt_zero=False):
         self._output_size = output_size
         self._hidden_state_size = hidden_state_size
         self.src_id = src_id
         self.tf_dtype = tf_dtype
+        self.assume_wt_zero = assume_wt_zero
 
         # The embedding matrix is reshaped because we will need to lookup into
         # it.
@@ -261,10 +262,14 @@ class TPPRExpCellStacked(tf.contrib.rnn.RNNCell):
             tf.zeros(dtype=self.tf_dtype, shape=(inf_batch_size,))
         )
         # print('LL_log = ', LL_log)
-        LL_int = (u_theta - u_theta_0) / self.tf_wt
-        # print('LL_int = ', LL_int)
-        loss = (tf.square(u_theta) - tf.square(u_theta_0)) / (2 * self.tf_wt)
-        # print('loss = ', loss)
+        if self.assume_wt_zero:
+            LL_int = u_theta * t_delta
+            loss = tf.square(u_theta) * t_delta
+        else:
+            LL_int = (u_theta - u_theta_0) / self.tf_wt
+            # print('LL_int = ', LL_int)
+            loss = (tf.square(u_theta) - tf.square(u_theta_0)) / (2 * self.tf_wt)
+            # print('loss = ', loss)
 
         return ((h_next,
                  tf.expand_dims(LL_log, axis=-1, name='LL_log'),
@@ -278,7 +283,10 @@ class TPPRExpCellStacked(tf.contrib.rnn.RNNCell):
         t_0 = tf.zeros(name='zero_time_last', shape=(inf_batch_size, 1), dtype=self.tf_dtype)
         u_theta_0 = self.u_theta(last_h, t_0, name='u_theta_LL_last_0')
         u_theta = self.u_theta(last_h, tf.reshape(last_interval, (-1, 1)), name='u_theta_LL_last')
-        return tf.squeeze(-(1 / self.tf_wt) * (u_theta - u_theta_0), axis=-1)
+        if self.assume_wt_zero:
+            return tf.squeeze(- u_theta * tf.reshape(last_interval, (-1, 1)))
+        else:
+            return tf.squeeze(-(1 / self.tf_wt) * (u_theta - u_theta_0), axis=-1)
 
     def last_loss(self, last_h, last_interval):
         """Calculate the squared loss of the survival term."""
@@ -286,12 +294,15 @@ class TPPRExpCellStacked(tf.contrib.rnn.RNNCell):
         t_0 = tf.zeros(name='zero_time_last', shape=(inf_batch_size, 1), dtype=self.tf_dtype)
         u_theta_0 = self.u_theta(last_h, t_0, name='u_theta_loss_last_0')
         u_theta = self.u_theta(last_h, tf.reshape(last_interval, (-1, 1)), name='u_theta_loss_last')
-        return tf.squeeze(
-            (1 / (2 * self.tf_wt)) * (
-                tf.square(u_theta) - tf.square(u_theta_0)
-            ),
-            axis=-1
-        )
+        if self.assume_wt_zero:
+            return tf.squeeze(tf.square(u_theta) * tf.reshape(last_interval, (-1, 1)))
+        else:
+            return tf.squeeze(
+                (1 / (2 * self.tf_wt)) * (
+                    tf.square(u_theta) - tf.square(u_theta_0)
+                ),
+                axis=-1
+            )
 
     @property
     def output_size(self):
@@ -311,10 +322,11 @@ class TPPRExpMarkedCellStacked(tf.contrib.rnn.RNNCell):
 
     def __init__(self, hidden_state_size, output_size, tf_dtype,
                  Wm, Wr, Wh, Wt, Bh,
-                 wt, vt, bt, Vy):
+                 wt, vt, bt, Vy, assume_wt_zero=False):
         self._output_size = output_size
         self._hidden_state_size = hidden_state_size
         self.tf_dtype = tf_dtype
+        self.assume_wt_zero = assume_wt_zero
 
         # The embedding matrix is reshaped because we will need to lookup into
         # it.
@@ -390,8 +402,12 @@ class TPPRExpMarkedCellStacked(tf.contrib.rnn.RNNCell):
             tf.log(tf.gather(v_unrolled, b_idx + lookup_offset))
         )
 
-        LL_int = (u_theta - u_theta_0) / self.tf_wt
-        loss = (tf.square(u_theta) - tf.square(u_theta_0)) / (2 * self.tf_wt)
+        if self.assume_wt_zero:
+            LL_int = u_theta * t_delta
+            loss = tf.square(u_theta) * t_delta
+        else:
+            LL_int = (u_theta - u_theta_0) / self.tf_wt
+            loss = (tf.square(u_theta) - tf.square(u_theta_0)) / (2 * self.tf_wt)
 
         return ((h_next,
                  tf.expand_dims(LL_log, axis=-1, name='LL_log'),
@@ -406,7 +422,10 @@ class TPPRExpMarkedCellStacked(tf.contrib.rnn.RNNCell):
         t_0 = tf.zeros(name='zero_time_last', shape=(inf_batch_size, 1), dtype=self.tf_dtype)
         u_theta_0 = self.u_theta(last_h, t_0, name='u_theta_LL_last_0')
         u_theta = self.u_theta(last_h, tf.reshape(last_interval, (-1, 1)), name='u_theta_LL_last')
-        return tf.squeeze(-(1 / self.tf_wt) * (u_theta - u_theta_0), axis=-1)
+        if self.assume_wt_zero:
+            return tf.squeeze(- u_theta * tf.reshape(last_interval, (-1, 1)))
+        else:
+            return tf.squeeze(-(1 / self.tf_wt) * (u_theta - u_theta_0), axis=-1)
 
     def last_loss(self, last_h, last_interval):
         """Calculate the squared loss of the survival term."""
@@ -414,12 +433,15 @@ class TPPRExpMarkedCellStacked(tf.contrib.rnn.RNNCell):
         t_0 = tf.zeros(name='zero_time_last', shape=(inf_batch_size, 1), dtype=self.tf_dtype)
         u_theta_0 = self.u_theta(last_h, t_0, name='u_theta_loss_last_0')
         u_theta = self.u_theta(last_h, tf.reshape(last_interval, (-1, 1)), name='u_theta_loss_last')
-        return tf.squeeze(
-            (1 / (2 * self.tf_wt)) * (
-                tf.square(u_theta) - tf.square(u_theta_0)
-            ),
-            axis=-1
-        )
+        if self.assume_wt_zero:
+            return tf.squeeze(tf.square(u_theta) * tf.reshape(last_interval, (-1, 1)))
+        else:
+            return tf.squeeze(
+                (1 / (2 * self.tf_wt)) * (
+                    tf.square(u_theta) - tf.square(u_theta_0)
+                ),
+                axis=-1
+            )
 
     @property
     def output_size(self):
