@@ -119,27 +119,38 @@ class ExpCDFSampler(CDFSampler):
 
     def cdf(self, t):
         """Calculates the CDF assuming that the last event was at self.t0"""
-        return 1 - np.exp((np.exp(self.c) / self.w) * (1 - np.exp(self.w * (t - self.t0))))
+        if self.w == 0:
+            return 1 - np.exp(- np.exp(self.c) * (t - self.t0))
+        else:
+            return 1 - np.exp((np.exp(self.c) / self.w) * (1 - np.exp(self.w * (t - self.t0))))
 
     def generate_sample(self):
         """Find a sample from the Exp process."""
         # Have the uniform sample already drawn
-        D = 1 - (self.w / np.exp(self.c)) * np.log((1 - self.u_unif) / self.Q)
-        if D <= 0:
-            # This is the probability that no event ever happens
-            return np.inf
+        if self.w == 0:
+            return self.t0 - np.log((1 - self.u_unif) / self.Q) / np.exp(self.c)
         else:
-            return self.t0 + (1 / self.w) * np.log(D)
+            D = 1 - (self.w / np.exp(self.c)) * np.log((1 - self.u_unif) / self.Q)
+            if D <= 0:
+                # This is the probability that no event ever happens
+                return np.inf
+            else:
+                return self.t0 + (1 / self.w) * np.log(D)
 
     def int_u(self, dt, c):
-        return (1 / self.wt) * (np.exp(c + self.wt * dt) - np.exp(c))
+        if self.w == 0:
+            return np.exp(c) * dt
+        else:
+            return (np.exp(c) / self.w) * (np.exp(self.w * dt) - 1)
 
     def log_u(self, dt, c):
-        return c + self.wt * dt
+        return c + self.w * dt
 
     def int_u_2(self, dt, c):
-        return (1 / (2 * self.wt)) * (np.exp(2 * c + 2 * self.wt * dt) -
-                                      np.exp(2 * c))
+        if self.w == 0:
+            return np.exp(2 * c) * dt
+        else:
+            return (np.exp(2 * c) / (2 * self.w)) * (np.exp(2 * self.w * dt) - 1)
 
 
 class SigmoidCDFSampler(CDFSampler):
