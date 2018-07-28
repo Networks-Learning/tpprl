@@ -31,9 +31,11 @@ import sys
 @click.option('--until', 'until', help='How many steps of iterations to run.', default=20000, show_default=True)
 @click.option('--with-mp/--no-with-mp', 'with_MP', help='Whether to use multiprocessing module to run simulations in parallel.', default=True, show_default=True)
 @click.option('--with-recall-probs/--no-with-recall-probs', 'with_recall_probs', help='Whether to provide true probability of recall or only binary feedback to the agent.', default=False, show_default=True)
+@click.option('--with-zero-wt/--no-with-zero-wt', 'with_zero_wt', help='Force wt to be zero.', default=False, show_default=True)
 def cmd(initial_difficulty_csv, alpha, beta, output_dir, should_restore,
         T, tau, with_summaries, summary_suffix, only_cpu, q, q_entropy,
-        epochs, num_iters, save_every, until, with_MP, with_recall_probs):
+        epochs, num_iters, save_every, until, with_MP, with_recall_probs,
+        with_zero_wt):
     """Read initial difficulty of items from INITIAL_DIFFICULTY_CSV, ALPHA and
     BETA, train an optimal teacher and save the results to output_dir."""
 
@@ -68,7 +70,8 @@ def cmd(initial_difficulty_csv, alpha, beta, output_dir, should_restore,
         q_entropy=q_entropy,
         learning_bump=1.0,
         decay_steps=10,
-        scenario_opts=scenario_opts
+        scenario_opts=scenario_opts,
+        set_wt_zero=with_zero_wt,
     )
 
     config = tf.ConfigProto(

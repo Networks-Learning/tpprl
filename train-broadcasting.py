@@ -53,10 +53,11 @@ def log_eval(u_data):
 @click.option('--algo-lifetime-frac', 'algo_lifetime_frac', help='The decay parameter for algorithmic feeds.', default=0.1, show_default=True)
 @click.option('--algo-approx/--no-algo-approx', 'with_approx_rewards', help='Whether to use exact or approximate rewards for algorithmic feeds.', default=True, show_default=True)
 @click.option('--merge-sinks/--no-merge-sinks', 'merge_sinks', help='Should all followers be merged into one giant wall.', default=True, show_default=True)
+@click.option('--with-zero-wt/--no-with-zero-wt', 'with_zero_wt', help='Force wt to be zero.', default=False, show_default=True)
 def run(all_user_data_file, user_idx, output_dir, q, N, gpu, reward_kind, K, should_restore, algo_lifetime_frac,
         hidden_dims, only_cpu, with_summaries, epochs, num_iters, save_every, until,
         log_device_placement, allow_growth, algo_feed, algo_c, with_approx_rewards,
-        merge_sinks):
+        merge_sinks, with_zero_wt):
     """Read data from `all_user_data`, extract `user_idx` from the array and run code for it."""
 
     assert reward_kind in [EB.R_2_REWARD, EB.TOP_K_REWARD], '"{}" is not recognized as a reward_kind.'.format(reward_kind)
@@ -102,6 +103,7 @@ def run(all_user_data_file, user_idx, output_dir, q, N, gpu, reward_kind, K, sho
         with_baseline=with_baseline,
         summary_dir=os.path.join(output_dir, 'train-summary-user_idx-{}/train'.format(user_idx)),
         save_dir=save_dir,
+        set_wt_zero=with_zero_wt,
     )
 
     config = tf.ConfigProto(

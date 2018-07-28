@@ -22,8 +22,9 @@ OUTPUT_DIR = "/tmp"
 @click.option('--N', 'N', help='What should be the average number of posts in a window?', default=300, show_default=True)
 @click.option('--algo-feed/--no-algo-feed', 'algo_feed', help='Use algorithmic feeds.', default=False, show_default=True)
 @click.option('--algo-approx/--no-algo-approx', 'with_approx_rewards', help='Whether to use exact or approximate rewards for algorithmic feeds.', default=True, show_default=True)
+@click.option('--with-zero-wt/--no-with-zero-wt', 'with_zero_wt', help='Force wt to be zero.', default=False, show_default=True)
 def run(in_csv, user_data_file, dry, epochs, k, mem, reward_kind, output_dir, until, q, save_every,
-        algo_feed, with_approx_rewards, N):
+        algo_feed, with_approx_rewards, N, with_zero_wt):
     """Read parameters from in_csv, ignore the host/gpu information, and execute them on using sbatch."""
     os.makedirs(os.path.join(output_dir, 'stdout'), exist_ok=True)
     df = pd.read_csv(in_csv)
@@ -38,6 +39,11 @@ def run(in_csv, user_data_file, dry, epochs, k, mem, reward_kind, output_dir, un
     else:
         algo_approx_str = '--no-algo-approx'
 
+    if with_zero_wt:
+        with_zero_wt_str = '--with-zero-wt'
+    else:
+        with_zero_wt_str = '--no-with-zero-wt'
+
     for row_idx, row in df.iterrows():
         stdout_file = f'{output_dir}/stdout/user_idx-{row.idx}.%j.out'
 
@@ -48,12 +54,12 @@ def run(in_csv, user_data_file, dry, epochs, k, mem, reward_kind, output_dir, un
             cmd = (f'sbatch -c 2 --mem={mem} -o "{stdout_file}" ' +
                    f'./top_k_job.sh {user_data_file} {row.idx} "{output_dir}" ' +
                    f'{N} {q} {until} {epochs} {k} {save_every} ' +
-                   f'{algo_feed_str} {algo_approx_str}')
+                   f'{algo_feed_str} {algo_approx_str} {with_zero_wt_str}')
         elif reward_kind == 'r_2_reward':
             cmd = (f'sbatch -c 2 --mem={mem} -o "{stdout_file}" ' +
                    f'./r_2_job.sh {user_data_file} {row.idx} "{output_dir}" ' +
                    f'{N} {q} {until} {epochs} {save_every} ' +
-                   f'{algo_feed_str} {algo_approx_str}')
+                   f'{algo_feed_str} {algo_approx_str} {with_zero_wt_str}')
         else:
             raise ValueError("Unknown reward: {}".format(reward_kind))
 

@@ -279,6 +279,8 @@ def mk_def_teacher_opts(hidden_dims, num_items,
         q_entropy=0.01,
 
         scenario_opts=scenario_opts,
+
+        set_wt_zero=False,
     )
 
     return def_exp_recurrent_teacher_opts.set(**kwargs)
@@ -291,7 +293,7 @@ class ExpRecurrentTeacher:
                  learning_bump, learning_rate, clip_norm, t_min, T,
                  summary_dir, save_dir, decay_steps, decay_rate, momentum,
                  device_cpu, device_gpu, only_cpu, with_baseline,
-                 num_items, decay_q_rate, scenario_opts, tau):
+                 num_items, decay_q_rate, scenario_opts, tau, set_wt_zero):
         """Initialize the trainer with the policy parameters."""
 
         self.decay_q_rate = decay_q_rate
@@ -301,6 +303,8 @@ class ExpRecurrentTeacher:
         self.t_max = T
         # self.T = T
         # self.tau = tau
+
+        self.set_wt_zero = set_wt_zero
 
         self.summary_dir = summary_dir
         self.save_dir = save_dir
@@ -382,8 +386,10 @@ class ExpRecurrentTeacher:
                                                  initializer=tf.constant_initializer(bt))
                     self.tf_vt = tf.get_variable(name='vt', shape=vt.shape,
                                                  initializer=tf.constant_initializer(vt))
+
+                    wt_init = 0.0 if set_wt_zero else wt
                     self.tf_wt = tf.get_variable(name='wt', shape=wt.shape,
-                                                 initializer=tf.constant_initializer(wt))
+                                                 initializer=tf.constant_initializer(wt_init))
                 # self.tf_t_delta = tf.placeholder(name='t_delta', shape=1, dtype=self.tf_dtype)
                 # self.tf_u_t = tf.exp(
                 #     tf.tensordot(self.tf_vt, self.tf_h, axes=1) +
@@ -452,7 +458,8 @@ class ExpRecurrentTeacher:
                             Wh=self.Wh_mini, Wt=self.Wt_mini,
                             Bh=self.Bh_mini, wt=self.wt_mini,
                             vt=self.vt_mini, bt=self.bt_mini,
-                            Vy=self.Vy_mini
+                            Vy=self.Vy_mini,
+                            assume_wt_zero=self.set_wt_zero,
                         )
 
                         ((self.h_states_stack, LL_log_terms_stack,
@@ -547,7 +554,11 @@ class ExpRecurrentTeacher:
                 self.avg_gradient_stack = []
 
                 # TODO: Can we calculate natural gradients here easily?
-                avg_baseline = tf.reduce_mean(self.tf_batch_rewards, axis=0) + tf.reduce_mean(self.loss_stack, axis=0) if with_baseline else 0.0
+                if with_baseline:
+                    avg_baseline = (tf.reduce_mean(self.tf_batch_rewards, axis=0) +
+                                    tf.reduce_mean(self.loss_stack, axis=0))
+                else:
+                    avg_baseline = 0.0
 
                 # Removing the average reward + loss is not optimal baseline,
                 # but still reduces variance significantly.
@@ -556,6 +567,10 @@ class ExpRecurrentTeacher:
                 for x, y in zip(self.all_mini_vars, self.all_tf_vars):
                     LL_grad = self.LL_grad_stacked[x][0]
                     loss_grad = self.loss_grad_stacked[x][0]
+
+                    if self.set_wt_zero and y == self.tf_wt:
+                        self.avg_gradient_stack.append(([0.0], y))
+                        continue
 
                     dim = len(LL_grad.get_shape())
                     if dim == 1:

@@ -66,3 +66,5 @@ target/
 tpprl.save*/
 tpprl.summary*/
 tpprl-log*/
+
+.mypy_cache/
