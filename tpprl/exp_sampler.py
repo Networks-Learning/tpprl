@@ -225,9 +225,11 @@ def make_freq_prefs(one_user_data, sink_ids, src_lifetime_dict):
     for idx, (_, src_id) in enumerate(num_tweets_src_id):
         # print(src_id)
         src_id_map[src_id] = idx
+        # Lower preference is better.
         src_prefs[idx] = idx + 1
 
-    src_prefs[num_src - 1] = (num_src  / 2)
+    # Set the preference of our broadcaster as the median.
+    src_prefs[num_src - 1] = (num_src / 2)
 
     return {
         'sink_id_map': dict([(x, idx) for idx, x in enumerate(sink_ids)]),
@@ -255,8 +257,8 @@ def algo_rank_of(past_events, sink_id, src_id, all_prefs, c=1.0, t=None):
     sink_pref_vec = all_prefs['sink_prefs'][sink_idx]
     src_prefs = all_prefs['src_prefs']
 
-    src_importance = {src_id: np.dot(sink_pref_vec, src_prefs[all_prefs['src_id_map'][src_id]])
-                      for src_id in all_prefs['src_id_map'].keys()}
+    src_importance = {src_id: np.dot(sink_pref_vec, src_prefs[src_idx])
+                      for src_id, src_idx in all_prefs['src_id_map'].items()}
 
     feed = sorted(
         [(src_importance[ev.src_id] if (t - ev.cur_time) < lifetime[ev.src_id] else -100000,
