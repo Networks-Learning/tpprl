@@ -19,4 +19,4 @@ algo_feed=$9
 algo_approx=${10}
 with_zero_wt=${11}
 
-python train-broadcasting.py "${in_file}" "${user_idx}" "${out_dir}" --N $N --q $q --reward r_2_reward --until ${until} --epochs ${epochs} --restore --only-cpu --save-every $save_every $algo_feed $algo_approx ${with_zero_wt}
+python train-broadcasting.py "${in_file}" "${user_idx}" "${out_dir}" --N $N --q $q --reward r_2_reward --until ${until} --epochs ${epochs} --restore --only-cpu --save-every $save_every $algo_feed $algo_approx ${with_zero_wt} --no-merge-sinks
