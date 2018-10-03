@@ -1041,7 +1041,8 @@ def mk_scenario_from_opts(teacher_opts, seed):
                     init_h=np.zeros((teacher_opts.num_hidden_states, 1)))
 
 
-def mk_scenario_from_teacher(teacher, seed):
+def mk_scenario_from_teacher(teacher, seed, discretization=None, wt=None):
+    wt = teacher.sess.run(teacher.tf_wt) if wt is None else wt
     return Scenario(scenario_opts=teacher.scenario_opts,
                     seed=seed,
                     Wh=teacher.sess.run(teacher.tf_Wh),
