@@ -16,7 +16,7 @@ import sys
 @click.argument('initial_difficulty_csv', type=click.Path(exists=True))
 @click.argument('alpha', type=float)
 @click.argument('beta', type=float)
-@click.argument('output_dir', type=click.Path(exists=True))
+@click.argument('output_dir', type=click.Path())
 @click.option('--epochs', 'epochs', help='How many epochs to train for.', default=1000, show_default=True)
 @click.option('--num-iters', 'num_iters', help='How many iterations in each epoch.', default=50, show_default=True)
 @click.option('--save-every', 'save_every', help='How many epochs to save a copy of the parameters to disk.', default=200, show_default=True)
@@ -54,6 +54,9 @@ def cmd(initial_difficulty_csv, alpha, beta, output_dir, should_restore,
 
     summary_dir = os.path.join(output_dir, 'summary/train-{}'.format(summary_suffix))
     save_dir = os.path.join(output_dir, 'save/')
+
+    os.makedirs(summary_dir, exist_ok=True)
+    os.makedirs(save_dir, exist_ok=True)
 
     teacher_opts = ET.mk_def_teacher_opts(
         num_items=num_items,

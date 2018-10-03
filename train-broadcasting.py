@@ -52,7 +52,7 @@ def log_eval(u_data):
 @click.option('--algo-c', 'algo_c', help='DEPRECATED: The decay parameter for algorithmic feeds.', default=0.5, show_default=True)
 @click.option('--algo-lifetime-frac', 'algo_lifetime_frac', help='The decay parameter for algorithmic feeds.', default=0.1, show_default=True)
 @click.option('--algo-approx/--no-algo-approx', 'with_approx_rewards', help='Whether to use exact or approximate rewards for algorithmic feeds.', default=True, show_default=True)
-@click.option('--merge-sinks/--no-merge-sinks', 'merge_sinks', help='Should all followers be merged into one giant wall.', default=True, show_default=True)
+@click.option('--merge-sinks/--no-merge-sinks', 'merge_sinks', help='Should all followers be merged into one giant wall.', default=False, show_default=True)
 @click.option('--with-zero-wt/--no-with-zero-wt', 'with_zero_wt', help='Force wt to be zero.', default=False, show_default=True)
 def run(all_user_data_file, user_idx, output_dir, q, N, gpu, reward_kind, K, should_restore, algo_lifetime_frac,
         hidden_dims, only_cpu, with_summaries, epochs, num_iters, save_every, until,
