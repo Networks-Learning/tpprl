@@ -54,7 +54,8 @@ def worker_user(params):
     Uses only one core.
     """
     (user_idx, output_dir, test_batches, RQ_cap_adjust,
-     for_epoch, verbose, only_rl, algo_feed, algo_frac, merge_sinks) = params
+     for_epoch, verbose, only_rl, algo_feed, algo_frac, merge_sinks,
+     set_wt_zero) = params
 
     save_dir = os.path.join(output_dir, save_dir_tmpl.format(user_idx))
 
@@ -126,6 +127,9 @@ def worker_user(params):
         window_start=window_start,
         user_opt_dict=user_opt_dict
     )
+
+    if set_wt_zero:
+        rl_b_dict['wt'] = 0
 
     sink_ids = one_user_data['sim_opts'].sink_ids
     if algo_feed:
@@ -407,18 +411,20 @@ def worker_user(params):
 @click.option('--algo-feed/--no-algo-feed', 'algo_feed', help='Consider algorithmic feeds?', default=False, show_default=True)
 @click.option('--algo-frac', 'algo_frac', help='What fraction of the window is the lifetime of the priority queue?', default=0.1, show_default=True)
 @click.option('--merge-sinks/--no-merge-sinks', 'merge_sinks', help='Whether to merge the sinks or not.', default=True, show_default=True)
+@click.option('--set-wt-zero/--no-set-wt-zero', 'set_wt_zero', help='Force wt to be zero.', default=False, show_default=True)
 def run(output_dir, save_csv, tweeters_data_file, batches, force, RQ_cap_adjust, for_epoch,
-        parallel, verbose, only_rl, algo_feed, algo_frac, merge_sinks):
+        parallel, verbose, only_rl, algo_feed, algo_frac, merge_sinks, set_wt_zero):
     """Read all OUTPUT_DIR and compile the results for all users and save them in SAVE_CSV.
     The user data is read from IN_DATA_FILE and `batches` number of batches are executed.
     """
     cmd(output_dir, save_csv, tweeters_data_file, batches, force,
         RQ_cap_adjust, for_epoch, parallel, verbose, only_rl, algo_feed,
-        algo_frac, merge_sinks)
+        algo_frac, merge_sinks, set_wt_zero)
 
 
 def cmd(output_dir, save_csv, tweeters_data_file, batches, force, RQ_cap_adjust,
-        for_epoch, parallel, verbose, only_rl, algo_feed, algo_frac, merge_sinks):
+        for_epoch, parallel, verbose, only_rl, algo_feed, algo_frac, merge_sinks,
+        set_wt_zero):
 
     if os.path.exists(save_csv) and not force:
         print('File {} exists and --force was not supplied.'.format(save_csv))
@@ -433,10 +439,10 @@ def cmd(output_dir, save_csv, tweeters_data_file, batches, force, RQ_cap_adjust,
 
     save_dict = []
     all_params = [(x, output_dir, batches, RQ_cap_adjust,
-                   for_epoch, verbose, only_rl, algo_feed, algo_frac,
-                   merge_sinks)
+                   for_epoch_, verbose, only_rl, algo_feed, algo_frac,
+                   merge_sinks, set_wt_zero)
                   for x in user_idxes
-                  for for_epoch in all_epochs]
+                  for for_epoch_ in all_epochs]
 
     try:
         if parallel:
