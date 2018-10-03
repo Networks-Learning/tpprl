@@ -134,7 +134,7 @@ def worker_user(params):
     sink_ids = one_user_data['sim_opts'].sink_ids
     if algo_feed:
         algo_c = user_opt_dict['algo_c']
-        lifetimes = defaultdict(lambda: (eval_sim_opts.end_time - window_start) / 10.)
+        lifetimes = defaultdict(lambda: (eval_sim_opts.end_time - window_start) * algo_frac)
         # algo_feed_args = ES.make_prefs(sink_ids, src_ids, seed=algo_feed_seed,
         #                                src_lifetime_dict=lifetimes)
         algo_feed_args = ES.make_freq_prefs(
