@@ -44,6 +44,8 @@ def run(in_csv, user_data_file, dry, epochs, k, mem, reward_kind, output_dir, un
     else:
         with_zero_wt_str = '--no-with-zero-wt'
 
+    user_data_file_abs = os.path.abspath(user_data_file)
+
     for row_idx, row in df.iterrows():
         stdout_file = f'{output_dir}/stdout/user_idx-{row.idx}.%j.out'
 
@@ -52,12 +54,12 @@ def run(in_csv, user_data_file, dry, epochs, k, mem, reward_kind, output_dir, un
 
         if reward_kind == 'top_k_reward':
             cmd = (f'sbatch -c 2 --mem={mem} -o "{stdout_file}" ' +
-                   f'./top_k_job.sh {user_data_file} {row.idx} "{output_dir}" ' +
+                   f'./top_k_job.sh {user_data_file_abs} {row.idx} "{output_dir}" ' +
                    f'{N} {q} {until} {epochs} {k} {save_every} ' +
                    f'{algo_feed_str} {algo_approx_str} {with_zero_wt_str}')
         elif reward_kind == 'r_2_reward':
             cmd = (f'sbatch -c 2 --mem={mem} -o "{stdout_file}" ' +
-                   f'./r_2_job.sh {user_data_file} {row.idx} "{output_dir}" ' +
+                   f'./r_2_job.sh {user_data_file_abs} {row.idx} "{output_dir}" ' +
                    f'{N} {q} {until} {epochs} {save_every} ' +
                    f'{algo_feed_str} {algo_approx_str} {with_zero_wt_str}')
         else:
