@@ -12,7 +12,7 @@ try:
     from .utils import variable_summaries, _now, average_gradients, get_test_dfs
     from .cells import TPPRExpCell, TPPRExpCellStacked
     from .exp_sampler import ExpRecurrentBroadcasterMP, ExpRecurrentBroadcaster, ExpCDFSampler, algo_true_rank, algo_top_k
-    from .read_data_utils import prune_sim_opts
+    from .read_data_utils import prune_sim_opts_by_followee
 except ModuleNotFoundError:
     warnings.warn('Could not import local modules. Assuming they have been loaded using %run -i')
 
@@ -1384,7 +1384,7 @@ def make_real_data_batch_sim_opts(one_user_data, N, is_test, seed):
         # In that case, move the window once step to the left.
         while True:
             window_start = window_end - window_len
-            new_sim_opts = prune_sim_opts(
+            new_sim_opts = prune_sim_opts_by_followee(
                 one_user_data['sim_opts'],
                 followee_ids=one_user_data['followees'],
                 start_time=window_start,
@@ -1393,16 +1393,19 @@ def make_real_data_batch_sim_opts(one_user_data, N, is_test, seed):
             if sum(len(d['times']) for _, d in new_sim_opts.other_sources) > 0:
                 break
             else:
+                assert False, "Testing period should always have exactly 300 events always."
                 window_end -= window_len
     else:
         # Sometimes, the window selected has no events at all.
         # In that case, select a different window.
         RS = np.random.RandomState(seed=seed)
+        loop_idx = 0
         while True:
+            loop_idx += 1
             window_start = start_time + RS.rand() * (duration - 2 * window_len)
             window_end = window_start + window_len
 
-            new_sim_opts = prune_sim_opts(
+            new_sim_opts = prune_sim_opts_by_followee(
                 one_user_data['sim_opts'],
                 followee_ids=one_user_data['followees'],
                 start_time=window_start,
@@ -1410,6 +1413,8 @@ def make_real_data_batch_sim_opts(one_user_data, N, is_test, seed):
             )
             if sum(len(d['times']) for _, d in new_sim_opts.other_sources) > 0:
                 break
+            elif loop_idx > 100:
+                assert False, "Infinite loop while creating training window."
 
     return window_start, new_sim_opts
 
