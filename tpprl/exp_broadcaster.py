@@ -171,7 +171,7 @@ def mk_def_exp_recurrent_trainer_opts(num_other_broadcasters, hidden_dims,
 
         vt=RS.randn(hidden_dims, 1),
         wt=np.abs(RS.rand(1)) * -1,
-        bt=np.abs(RS.randn(1)),
+        bt=np.abs(RS.randn(1)) * -1,
 
         # The graph execution time depends on this parameter even though each
         # trajectory may contain much fewer events. So it is wise to set
@@ -1382,6 +1382,7 @@ def make_real_data_batch_sim_opts(one_user_data, N, is_test, seed):
         window_end = end_time
         # Sometimes, the window selected has no events at all.
         # In that case, move the window once step to the left.
+        loop_idx = 0
         while True:
             window_start = window_end - window_len
             new_sim_opts = prune_sim_opts_by_followee(
@@ -1393,7 +1394,8 @@ def make_real_data_batch_sim_opts(one_user_data, N, is_test, seed):
             if sum(len(d['times']) for _, d in new_sim_opts.other_sources) > 0:
                 break
             else:
-                assert False, "Testing period should always have exactly 300 events always."
+                # assert False, "Testing period should always have exactly 300 events always."
+
                 window_end -= window_len
     else:
         # Sometimes, the window selected has no events at all.
