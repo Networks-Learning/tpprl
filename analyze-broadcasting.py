@@ -8,7 +8,6 @@ import click
 import pandas as pd
 import os
 import glob
-import re
 import numpy as np
 import sys
 import dill
@@ -29,10 +28,6 @@ from collections import defaultdict
 # context switches, slowing down the overall calculation.
 os.environ['OMP_NUM_THREADS'] = "1"
 
-u_data_dir_tmpl = 'u_data-user_idx-{}'
-save_dir_tmpl = 'train-save-user_idx-{}'
-save_dir_regex = re.compile(r'train-save-user_idx-(\d*)')
-save_dir_glob = r'train-save-user_idx-*'
 user_data = None
 
 MAX_EVENTS = 8000
@@ -57,7 +52,7 @@ def worker_user(params):
      for_epoch, verbose, only_rl, algo_feed, algo_frac, merge_sinks,
      set_wt_zero) = params
 
-    save_dir = os.path.join(output_dir, save_dir_tmpl.format(user_idx))
+    save_dir = os.path.join(output_dir, EB.SAVE_DIR_TMPL.format(user_idx))
 
     if verbose:
         print('Working on user_idx: {}'.format(user_idx))
@@ -102,15 +97,11 @@ def worker_user(params):
     # Also, we drop the `.meta` suffix.
 
     if for_epoch < 0:
-        all_chpt_file = glob.glob(os.path.join(save_dir, '*.meta'))
-        if len(all_chpt_file) == 0:
-            if verbose:
-                print('No chpt files found for {}.'.format(user_idx))
+        for_epoch = EB.find_largest_chpt(save_dir, verbose=verbose)
+        if for_epoch is None:
             return ret
 
-        chosen_chpt_file = natsort.realsorted(all_chpt_file)[0][:-5]
-    else:
-        chosen_chpt_file = os.path.join(save_dir, 'tpprl.ckpt-{}'.format(for_epoch))
+    chosen_chpt_file = os.path.join(save_dir, EB.TPPRL_CHPT_TMPL.format(for_epoch))
 
     if verbose:
         print('chosen_chpt_file = ', chosen_chpt_file)
@@ -405,6 +396,7 @@ def worker_user(params):
 @click.option('--force/--no-force', 'force', help='Whether to overwrite the output-csv file.', default=False, show_default=True)
 @click.option('--RQ-cap-adjust', 'RQ_cap_adjust', help='How much to compensate the tweets of RedQueen by.', default=1.0, show_default=True)
 @click.option('--for-epoch', 'for_epoch', help='Whether to produce the CSV for a given epoch. Negative numbers of running it on the latest epoch. Can provide a comma separated list to run it on multiple epochs one after the other.', default='-1', show_default=True)
+@click.option('--limit-num-users', 'limit_num_users', help='Select only these many users to run the experiments on. Selection is sorted by first the number of training checkpoints and then the idx. Set negative to run on all users.', default=-1, show_default=True)
 @click.option('--parallel/--no-parallel', 'parallel', help='Whether to run on Multi-processing.', default=True, show_default=True)
 @click.option('--verbose/--no-verbose', 'verbose', help='Verbose mode.', default=False, show_default=True)
 @click.option('--only-rl/--no-only-rl', 'only_rl', help='Calculate only RL stats.', default=False, show_default=True)
@@ -413,18 +405,19 @@ def worker_user(params):
 @click.option('--merge-sinks/--no-merge-sinks', 'merge_sinks', help='Whether to merge the sinks or not.', default=True, show_default=True)
 @click.option('--set-wt-zero/--no-set-wt-zero', 'set_wt_zero', help='Force wt to be zero.', default=False, show_default=True)
 def run(output_dir, save_csv, tweeters_data_file, batches, force, RQ_cap_adjust, for_epoch,
-        parallel, verbose, only_rl, algo_feed, algo_frac, merge_sinks, set_wt_zero):
+        parallel, verbose, only_rl, algo_feed, algo_frac, merge_sinks, set_wt_zero,
+        limit_num_users):
     """Read all OUTPUT_DIR and compile the results for all users and save them in SAVE_CSV.
     The user data is read from IN_DATA_FILE and `batches` number of batches are executed.
     """
     cmd(output_dir, save_csv, tweeters_data_file, batches, force,
         RQ_cap_adjust, for_epoch, parallel, verbose, only_rl, algo_feed,
-        algo_frac, merge_sinks, set_wt_zero)
+        algo_frac, merge_sinks, set_wt_zero, limit_num_users)
 
 
 def cmd(output_dir, save_csv, tweeters_data_file, batches, force, RQ_cap_adjust,
         for_epoch, parallel, verbose, only_rl, algo_feed, algo_frac, merge_sinks,
-        set_wt_zero):
+        set_wt_zero, limit_num_users):
 
     if os.path.exists(save_csv) and not force:
         print('File {} exists and --force was not supplied.'.format(save_csv))
@@ -432,8 +425,11 @@ def cmd(output_dir, save_csv, tweeters_data_file, batches, force, RQ_cap_adjust,
 
     read_user_data(tweeters_data_file)
 
-    save_dirs = glob.glob(os.path.join(output_dir, save_dir_glob))
-    user_idxes = [int(save_dir_regex.search(x)[1]) for x in save_dirs]
+    save_dirs = glob.glob(os.path.join(output_dir, EB.SAVE_DIR_GLOB))
+    user_idxes = [int(EB.SAVE_DIR_REGEX.search(x)[1]) for x in save_dirs]
+
+    if limit_num_users > 0:
+        raise NotImplementedError
 
     all_epochs = [int(x) for x in for_epoch.split(',')]
 

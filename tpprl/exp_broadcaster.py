@@ -4,6 +4,9 @@ import redqueen.utils as RU
 import tensorflow as tf
 import decorated_options as Deco
 import warnings
+import re
+import natsort
+import glob
 import multiprocessing as MP
 from tensorflow.python import pywrap_tensorflow
 
@@ -16,6 +19,13 @@ try:
 except ModuleNotFoundError:
     warnings.warn('Could not import local modules. Assuming they have been loaded using %run -i')
 
+SAVE_DIR_TMPL = 'train-save-user_idx-{}'
+SAVE_DIR_REGEX = re.compile(r'train-save-user_idx-(\d*)')
+SAVE_DIR_GLOB = r'train-save-user_idx-*'
+
+TPPRL_CHPT = 'tpprl.ckpt'
+TPPRL_CHPT_TMPL = TPPRL_CHPT + '-{}'
+TPPRL_CHPT_REGEX = re.compile(TPPRL_CHPT  + '-(\d*)')
 
 SAVE_DIR = 'tpprl-log'
 os.makedirs(SAVE_DIR, exist_ok=True)
@@ -180,6 +190,7 @@ def mk_def_exp_recurrent_trainer_opts(num_other_broadcasters, hidden_dims,
         momentum=0.9,
         max_events=5000,
         batch_size=16,
+        adaptive_batches_steps=0,
 
         device_cpu='/cpu:0',
         device_gpu='/gpu:0',
@@ -226,7 +237,7 @@ class ExpRecurrentTrainer:
                  num_followers, decay_q_rate,
                  reward_top_k, reward_kind,
                  reward_episode_target, reward_target_weight,
-                 set_wt_zero):
+                 set_wt_zero, adaptive_batches_steps):
         """Initialize the trainer with the policy parameters."""
 
         self.reward_top_k = reward_top_k
@@ -235,6 +246,7 @@ class ExpRecurrentTrainer:
         self.reward_target_weight = reward_target_weight
         self.decay_q_rate = decay_q_rate
         self.set_wt_zero = set_wt_zero
+        self.adaptive_batches_steps = adaptive_batches_steps
 
         self.t_min = t_min
         self.t_max = sim_opts.end_time
@@ -962,7 +974,7 @@ class ExpRecurrentTrainer:
         if with_summaries:
             train_writer.flush()
 
-        chkpt_file = os.path.join(self.save_dir, 'tpprl.ckpt')
+        chkpt_file = os.path.join(self.save_dir, TPPRL_CHPT)
         self.saver.save(self.sess, chkpt_file, global_step=self.global_step,)
 
     def restore(self, restore_dir=None, epoch_to_recover=None):
@@ -1289,7 +1301,7 @@ def train_real_data(trainer, N, one_user_data, num_iters, init_seed, with_summar
     if with_summaries:
         train_writer.flush()
 
-    chkpt_file = os.path.join(trainer.save_dir, 'tpprl.ckpt')
+    chkpt_file = os.path.join(trainer.save_dir, TPPRL_CHPT)
     trainer.saver.save(trainer.sess, chkpt_file, global_step=trainer.global_step,)
 
 
@@ -1367,18 +1379,74 @@ def run_real_data_sim_from_chpt(rl_b_args, t_min, batch_sim_opt, seed):
     return mgr.get_state().get_dataframe()
 
 
+from typing import Iterable, List
+import heapq
+import bisect
+
+
+def get_other_events(
+        one_user_data,
+        start_time: float =0,
+        excluded_sources: Iterable[int]=None,
+        max_events: int =None
+):
+    """Returns the number of events on the wall of users."""
+    if excluded_sources is None:
+        excluded_sources = set()
+    else:
+        excluded_sources = set(excluded_sources)
+
+    if max_events is None:
+        return sorted([
+            t
+            for other_broadcaster in one_user_data['sim_opts'].other_sources
+            if other_broadcaster[1]['src_id'] not in excluded_sources
+            for t in other_broadcaster[1]['times']
+            if t > start_time
+        ])
+    else:
+        ret_events: List[float] = []
+        for other_broadcaster in one_user_data['sim_opts'].other_sources:
+            if other_broadcaster[1]['src_id'] not in excluded_sources:
+                times = other_broadcaster[1]['times']
+                start_idx = bisect.bisect(times, start_time)
+                times = times[start_idx:]
+                if len(ret_events) < max_events:
+                    ret_events = sorted(list(ret_events) + list(times))[-max_events:]
+                else:
+                    idx = bisect.bisect(times, ret_events[0])
+                    for t in times[idx:]:
+                        heapq.heappushpop(ret_events, t)
+        return sorted(ret_events)
+
+
+def find_last_period(one_user_data, N: int, excluded_sources: Iterable[int]=None, tol: float=0.1):
+    """Returns the start time such that number of remaining events is N."""
+    if excluded_sources is None:
+        excluded_sources = set()
+    else:
+        excluded_sources = set(excluded_sources)
+
+    other_events = get_other_events(one_user_data, start_time=0,
+                                    excluded_sources=excluded_sources,
+                                    max_events=N + 1)
+    return other_events[-N - 1] if len(other_events) > N else 0
+
+
 def make_real_data_batch_sim_opts(one_user_data, N, is_test, seed):
     """Create a batch from the given one_user_data which has roughly N posts from others.
     The last window is returned if is_test is true. Otherwise, a random window from
     inside the duration is returned."""
-    start_time, end_time = one_user_data['user_event_times'][0], one_user_data['user_event_times'][-1]
+    # start_time, end_time = one_user_data['user_event_times'][0], one_user_data['user_event_times'][-1]
+    start_time, end_time = one_user_data['scaled_period'] - one_user_data['duration'], one_user_data['scaled_period']
     duration = end_time - start_time
-    num_other_posts = one_user_data['num_other_posts']
 
-    window_len = (duration / num_other_posts) * N
+    num_other_posts = one_user_data['num_other_posts']
 
     # Have to pick a random window of this length if is_test=False
     if is_test:
+        window_start_time = find_last_period(one_user_data=one_user_data, N=N)
+        window_len = end_time - window_start_time
         window_end = end_time
         # Sometimes, the window selected has no events at all.
         # In that case, move the window once step to the left.
@@ -1400,6 +1468,7 @@ def make_real_data_batch_sim_opts(one_user_data, N, is_test, seed):
     else:
         # Sometimes, the window selected has no events at all.
         # In that case, select a different window.
+        window_len = (duration / num_other_posts) * N
         RS = np.random.RandomState(seed=seed)
         loop_idx = 0
         while True:
@@ -1497,7 +1566,7 @@ def train_real_data_algo(
     grad_norm_op = trainer.grad_norm_stack
     LL_op = trainer.LL_stack
     loss_op = trainer.loss_stack
-    chkpt_file = os.path.join(trainer.save_dir, 'tpprl.ckpt')
+    chkpt_file = os.path.join(trainer.save_dir, TPPRL_CHPT)
 
     pool = None
 
@@ -1771,3 +1840,15 @@ def get_real_data_eval_algo(
         u_data['batch_events'] = batch_events
 
     return u_data
+
+
+def find_largest_chpt(user_save_dir, verbose=True):
+    """Finds the checkpoint file with the highest index."""
+    all_chpt_file = glob.glob(os.path.join(user_save_dir, '*.meta'))
+    if len(all_chpt_file) == 0:
+        if verbose:
+            print('No chpt files found in {}.'.format(user_save_dir))
+        return None
+
+    chosen_chpt_file = natsort.realsorted(all_chpt_file)[0][:-5]
+    return int(TPPRL_CHPT_REGEX.search(chosen_chpt_file)[1])

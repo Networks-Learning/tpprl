@@ -62,7 +62,7 @@ def run(all_user_data_file, user_idx, output_dir, q, N, gpu, reward_kind, K, sho
 
     assert reward_kind in [EB.R_2_REWARD, EB.TOP_K_REWARD], '"{}" is not recognized as a reward_kind.'.format(reward_kind)
 
-    save_dir = os.path.join(output_dir, 'train-save-user_idx-{}'.format(user_idx))
+    save_dir = os.path.join(output_dir, EB.SAVE_DIR_TMPL.format(user_idx))
     if not os.path.exists(save_dir) and should_restore:
         warnings.warn('{} does not exist, will NOT RESTORE.'.format(save_dir))
 
