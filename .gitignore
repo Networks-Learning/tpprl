@@ -68,3 +68,4 @@ tpprl.summary*/
 tpprl-log*/
 
 .mypy_cache/
+.idea/
