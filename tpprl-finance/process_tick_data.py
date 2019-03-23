@@ -69,7 +69,28 @@ class State:
         return df
 
 
-class Policy:
+class SimpleTrading:
+    def __init__(self):
+        self.current_amt = MAX_AMT
+        self.owned_shares = 0
+
+    def get_next_action(self, event):
+        t_i = event.t_i + 60
+        return t_i
+
+
+class BollingerBandTrading:
+    def __init__(self):
+
+        self.current_amt = MAX_AMT
+        self.owned_shares = 0
+
+    def get_next_action(self, event):
+        t_i = event.t_i + 60
+        return t_i
+
+
+class RLTrading:
     def __init__(self, wt, W_t, Wb_alpha, Ws_alpha, Wn_b, Wn_s,
                  W_h, W_1, W_2, W_3, b_t, b_alpha, bn_b, bn_s, b_h,
                  V_t, Vh_alpha, Vv_alpha, Va_b, Va_s):
@@ -167,13 +188,19 @@ class Manager:
             self.tick_data = self.raw_data.groupby(self.raw_data["datetime"], as_index=False).last()
         elif self.time_gap == 'second':
             self.tick_data = self.raw_data.groupby(self.raw_data["datetime"], as_index=False).last()
+            window = 20
+            num_std = 2
+            rolling_mean = raw_data["price"].rolling(window).mean()
+            rolling_std = raw_data["price"].rolling(window).std()
+            self.tick_data["Bollinger_High"] = rolling_mean + (rolling_std*num_std)
+            self.tick_data["Bollinger_Low"] = rolling_mean - (rolling_std * num_std)
         else:
             raise ValueError("Time gap value '{}' not understood.".format(self.time_gap))
 
     def get_state(self):
         return self.state
 
-    def simulator(self):
+    def simulator_bollinger(self):
         last_event = ReadEvent(t_i=1254130200, v_curr=50.79, alpha_i=1, n_i=1)
         v_last = last_event.v_curr
         print("trading..")
@@ -185,8 +212,33 @@ class Manager:
                     # print("\nreading market value at time {}\n".format(last_event.t_i))
                     break
                 else:
-                    last_event = ActionEvent(t_i=next_agent_action, v_curr=row.price, alpha_i=int(last_event.alpha_i) ^ 1, n_i=1)
-                    # last_event = self.agent.get_number_of_share(last_event)
+                    if row.price > row.Bollinger_High:
+                        alpha_i = 1  # sell
+                    elif row.price < row.Bollinger_Low:
+                        alpha_i = 0  # buy
+                    else:
+                        alpha_i = last_event.alpha_i  # repeat last action
+                    last_event = ActionEvent(t_i=next_agent_action, v_curr=row.price, alpha_i=alpha_i, n_i=1)
+                    # save only action events
+                    # print("\ntaking action at time {}".format(last_event.t_i))
+                    self.state.apply_event(last_event)
+                v_last = last_event.v_curr
+        return v_last
+
+    def simulator_simple(self):
+        last_event = ReadEvent(t_i=1254130200, v_curr=50.79, alpha_i=1, n_i=1)
+        v_last = last_event.v_curr
+        print("trading..")
+        for (_idx, row) in self.tick_data.iterrows():
+            while True:
+                next_agent_action = self.agent.get_next_action(last_event)
+                if next_agent_action > row.datetime:
+                    last_event = ReadEvent(t_i=row.datetime, v_curr=row.price, alpha_i=last_event.alpha_i, n_i=1)
+                    # print("\nreading market value at time {}\n".format(last_event.t_i))
+                    break
+                else:
+                    last_event = ActionEvent(t_i=next_agent_action, v_curr=row.price,
+                                             alpha_i=int(last_event.alpha_i) ^ 1, n_i=1)
                     # save only action events
                     # print("\ntaking action at time {}".format(last_event.t_i))
                     self.state.apply_event(last_event)
@@ -207,37 +259,14 @@ if __name__ == '__main__':
     raw_data = read_raw_data()
 
     # initiate agent/broadcaster
-    wt = np.random.normal(size=(1, 1))
-    W_t = np.random.normal(size=(8, 1))
-    Wb_alpha = np.random.normal(size=(8, 1))
-    Ws_alpha = np.random.normal(size=(8, 1))
-    Wn_b = np.random.normal(size=(8, 1))
-    Wn_s = np.random.normal(size=(8, 1))
-    W_h = np.random.normal(size=(8, 8))
-    W_1 = np.random.normal(size=(8, 8))
-    W_2 = np.random.normal(size=(8, 8))
-    W_3 = np.random.normal(size=(8, 8))
-    b_t = np.random.normal(size=(8, 1))
-    b_alpha = np.random.normal(size=(8, 1))
-    bn_b = np.random.normal(size=(8, 1))
-    bn_s = np.random.normal(size=(8, 1))
-    b_h = np.random.normal(size=(8, 8))
-    V_t = np.random.normal(size=(1, 8))
-    Vh_alpha = np.random.normal(size=(1, 8))
-    Vv_alpha = np.random.normal(size=(1, 1))
-    Va_b = np.random.normal(size=(100, 8))
-    Va_s = np.random.normal(size=(100, 8))
-
-    agent = Policy(wt=wt, W_t=W_t, Wb_alpha=Wb_alpha, Ws_alpha=Ws_alpha, Wn_b=Wn_b, Wn_s=Wn_s,
-                   W_h=W_h, W_1=W_1, W_2=W_2, W_3=W_3, b_t=b_t, b_alpha=b_alpha, bn_b=bn_b, bn_s=bn_s,
-                   b_h=b_h, V_t=V_t, Vh_alpha=Vh_alpha, Vv_alpha=Vv_alpha, Va_b=Va_b, Va_s=Va_s)
+    agent = SimpleTrading()
 
     # start time is set to '2009-09-28 09:30:00' i.e. 9:30 am of 28sept2009
     # max time T is set to '2009-09-28 16:00:00' i.e. same day 4pm
     mgr = Manager(T=1254153600, time_gap="second", raw_data=raw_data, agent=agent, start_time=1254130200)
-    v_last = mgr.simulator()
+    v_last = mgr.simulator_bollinger()
     event_df = mgr.get_state().get_dataframe()
     reward = reward_fn(events=event_df, v_last=v_last)
     print("reward = ", reward)
 
-#  TODO implement Bollinger band strategy
+#  TODO: run simulator_bollinger an check result
