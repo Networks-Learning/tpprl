@@ -1,5 +1,4 @@
 """
-Output of current buy/sell strategy i.e. reward :1010.0621000000051
 """
 import numpy as np
 import pandas as pd
@@ -17,7 +16,7 @@ def reward_fn(events, v_last):
         if event.alpha_i == 0:
             reward -= event.n_i*event.v_curr
             owned_shares += event.n_i
-        else:
+        elif event.alpha_i == 1:
             reward += event.n_i * event.v_curr
             owned_shares -= event.n_i
     reward += owned_shares*v_last
@@ -51,11 +50,11 @@ class State:
         self.events.append(event)
         self.time = event.t_i
         # if event.alpha_i == 0:
-        #     print("* BUY {} shares at price of {}".format(event.n_i, event.v_curr))
+        #     print("* BUY {} shares at price of {} at time {}".format(event.n_i, event.v_curr, event.t_i))
         # else:
-        #     print("* SELL {} shares at price of {}".format(event.n_i, event.v_curr))
+        #     print("* SELL {} shares at price of {} at time {}".format(event.n_i, event.v_curr, event.t_i))
 
-    def get_dataframe(self):
+    def get_dataframe(self, output_file):
         df = pd.DataFrame.from_records(
             [{"t_i": event.t_i,
               "alpha_i": event.alpha_i,
@@ -63,9 +62,10 @@ class State:
               "v_curr": event.v_curr,
               "sample_u": event.sample_u} for event in self.events])
         print("\n saving events:")
-        print(df[:1].values)
-        folder = "/home/psupriya/MY_HOME/tpprl_finance/dataset/"
-        df.to_csv(folder + "/output_events.csv", index=False)
+        print(df[:2].values)
+        # folder = "/home/psupriya/MY_HOME/tpprl_finance/dataset/"
+        folder = "/home/supriya/MY_HOME/MPI-SWS/dataset/"
+        df.to_csv(folder + output_file, index=False)
         return df
 
 
@@ -75,7 +75,7 @@ class SimpleTrading:
         self.owned_shares = 0
 
     def get_next_action(self, event):
-        t_i = event.t_i + 60
+        t_i = event.t_i + 5
         return t_i
 
 
@@ -86,8 +86,22 @@ class BollingerBandTrading:
         self.owned_shares = 0
 
     def get_next_action(self, event):
-        t_i = event.t_i + 60
+        t_i = event.t_i + 5
         return t_i
+
+    def get_owned_shares(self):
+        return self.owned_shares
+
+    def get_current_amt(self):
+        return self.current_amt
+
+    def update_owned_shares(self, event):
+        if event.alpha_i == 0:
+            self.owned_shares += event.n_i
+            self.current_amt -= event.n_i * event.v_curr
+        else:
+            self.owned_shares -= event.n_i
+            self.current_amt += event.n_i * event.v_curr
 
 
 class RLTrading:
@@ -174,7 +188,7 @@ class RLTrading:
         return event
 
 
-class Manager:
+class BollingerBandEnvironment:
     def __init__(self, T, time_gap, raw_data, agent, start_time):
         self.T = T
         self.state = State(curr_time=start_time)
@@ -190,10 +204,13 @@ class Manager:
             self.tick_data = self.raw_data.groupby(self.raw_data["datetime"], as_index=False).last()
             window = 20
             num_std = 2
-            rolling_mean = raw_data["price"].rolling(window).mean()
-            rolling_std = raw_data["price"].rolling(window).std()
-            self.tick_data["Bollinger_High"] = rolling_mean + (rolling_std*num_std)
+            rolling_mean = raw_data["price"].rolling(window=window, min_periods=1).mean()
+            rolling_std = raw_data["price"].rolling(window=window, min_periods=1).std()
+            self.tick_data["Bollinger_High"] = rolling_mean + (rolling_std * num_std)
             self.tick_data["Bollinger_Low"] = rolling_mean - (rolling_std * num_std)
+            self.tick_data["Bollinger_High"].iloc[0] = self.tick_data["price"].iloc[0]
+            self.tick_data["Bollinger_Low"].iloc[0] = self.tick_data["price"].iloc[0]
+            print(self.tick_data.head())
         else:
             raise ValueError("Time gap value '{}' not understood.".format(self.time_gap))
 
@@ -201,36 +218,61 @@ class Manager:
         return self.state
 
     def simulator_bollinger(self):
-        last_event = ReadEvent(t_i=1254130200, v_curr=50.79, alpha_i=1, n_i=1)
+        last_event = ReadEvent(t_i=1254130200, v_curr=50.79, alpha_i=-1, n_i=0)
         v_last = last_event.v_curr
         print("trading..")
         for (_idx, row) in self.tick_data.iterrows():
-            while True:
-                next_agent_action = self.agent.get_next_action(last_event)
-                if next_agent_action > row.datetime:
-                    last_event = ReadEvent(t_i=row.datetime, v_curr=row.price, alpha_i=last_event.alpha_i, n_i=1)
+            while True:  # self.state.time <= self.T:
+                next_agent_action_time = self.agent.get_next_action(last_event)
+                if next_agent_action_time > row.datetime:
+                    last_event = ReadEvent(t_i=row.datetime, v_curr=row.price, alpha_i=-1, n_i=0)
                     # print("\nreading market value at time {}\n".format(last_event.t_i))
                     break
                 else:
-                    if row.price > row.Bollinger_High:
-                        alpha_i = 1  # sell
-                    elif row.price < row.Bollinger_Low:
-                        alpha_i = 0  # buy
+                    if row.price < row.Bollinger_Low and self.agent.get_current_amt() > row.price:
+                        alpha_i = 0  # buy if current price is less than Bollinger Lower Band
+                    elif row.price > row.Bollinger_High and self.agent.get_owned_shares() > 0:
+                        alpha_i = 1  # sell if current price is more than Bollinger Higher Band
                     else:
-                        alpha_i = last_event.alpha_i  # repeat last action
-                    last_event = ActionEvent(t_i=next_agent_action, v_curr=row.price, alpha_i=alpha_i, n_i=1)
-                    # save only action events
-                    # print("\ntaking action at time {}".format(last_event.t_i))
-                    self.state.apply_event(last_event)
+                        if last_event.alpha_i == 0:
+                            alpha_i = 1  # else switch between buying and selling
+                        else:
+                            alpha_i = 0
+                    last_event = ActionEvent(t_i=next_agent_action_time, v_curr=row.price, alpha_i=alpha_i, n_i=1)
+                    self.agent.update_owned_shares(last_event)
+
+                self.state.apply_event(last_event)
                 v_last = last_event.v_curr
         return v_last
+
+
+class SimpleEnvironment:
+    def __init__(self, T, time_gap, raw_data, agent, start_time):
+        self.T = T
+        self.state = State(curr_time=start_time)
+        self.time_gap = time_gap
+        self.raw_data = raw_data
+        self.agent = agent
+
+        # for reading market value per minute
+        if self.time_gap == "minute":
+            # TODO need to find a way to group by minute using unix timestamp
+            self.tick_data = self.raw_data.groupby(self.raw_data["datetime"], as_index=False).last()
+        elif self.time_gap == 'second':
+            self.tick_data = self.raw_data.groupby(self.raw_data["datetime"], as_index=False).last()
+            print(self.tick_data.head())
+        else:
+            raise ValueError("Time gap value '{}' not understood.".format(self.time_gap))
+
+    def get_state(self):
+        return self.state
 
     def simulator_simple(self):
         last_event = ReadEvent(t_i=1254130200, v_curr=50.79, alpha_i=1, n_i=1)
         v_last = last_event.v_curr
         print("trading..")
         for (_idx, row) in self.tick_data.iterrows():
-            while True:
+            while self.state.time <= self.T:
                 next_agent_action = self.agent.get_next_action(last_event)
                 if next_agent_action > row.datetime:
                     last_event = ReadEvent(t_i=row.datetime, v_curr=row.price, alpha_i=last_event.alpha_i, n_i=1)
@@ -246,10 +288,12 @@ class Manager:
         return v_last
 
 
+
 def read_raw_data():
     """ read raw_data """
     print("reading raw data")
-    folder = "/home/psupriya/MY_HOME/tpprl_finance/dataset/"
+    # folder = "/home/psupriya/MY_HOME/tpprl_finance/dataset/"
+    folder = "/home/supriya/MY_HOME/MPI-SWS/dataset"
     raw = pd.read_csv(folder + "/raw_data.csv")  # header names=['datetime', 'price'])
     df = pd.DataFrame(raw)
     return df
@@ -259,14 +303,15 @@ if __name__ == '__main__':
     raw_data = read_raw_data()
 
     # initiate agent/broadcaster
-    agent = SimpleTrading()
+    agent = BollingerBandTrading()
 
     # start time is set to '2009-09-28 09:30:00' i.e. 9:30 am of 28sept2009
     # max time T is set to '2009-09-28 16:00:00' i.e. same day 4pm
-    mgr = Manager(T=1254153600, time_gap="second", raw_data=raw_data, agent=agent, start_time=1254130200)
+    mgr = BollingerBandEnvironment(T=1254153600, time_gap="second", raw_data=raw_data, agent=agent, start_time=1254130200)
     v_last = mgr.simulator_bollinger()
-    event_df = mgr.get_state().get_dataframe()
+
+    output_file = "output_event_bollinger_5sec_entire_dataset.csv"
+    event_df = mgr.get_state().get_dataframe(output_file)
     reward = reward_fn(events=event_df, v_last=v_last)
     print("reward = ", reward)
-
-#  TODO: run simulator_bollinger an check result
+# TODO running out of memory for 5 sec action time, entire dataset
