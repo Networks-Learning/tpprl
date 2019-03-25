@@ -2,6 +2,7 @@
 """
 import numpy as np
 import pandas as pd
+from collections import deque
 
 HIDDEN_LAYER_DIM = 8
 MAX_AMT = 1000
@@ -23,20 +24,38 @@ def reward_fn(events, v_last):
     return reward
 
 
-class ActionEvent:
-    def __init__(self, t_i, v_curr, alpha_i, n_i):
+class Action:
+    def __init__(self, alpha, n):
+        self.alpha = alpha
+        self.n = n
+
+    def __str__(self):
+        return "<{}: {}>".format("Sell" if self.alpha > 0 else "Buy", self.n)
+
+
+class Feedback:
+    def __init__(self, t_i, v_curr, sample_u):
         self.t_i = t_i
         self.v_curr = v_curr
-        self.sample_u = True
+        self.sample_u = sample_u
+
+    def is_trade_event(self):
+        return self.sample_u
+
+    def is_tick_event(self):
+        return not self.sample_u
+
+
+class TradeFeedback(Feedback):
+    def __init__(self, t_i, v_curr, alpha_i, n_i):
+        super(self).__init__(t_i, v_curr, sample_u=True)
         self.alpha_i = alpha_i
         self.n_i = n_i
 
 
-class ReadEvent:
+class TickFeedback(Feedback):
     def __init__(self, t_i, v_curr, alpha_i, n_i):
-        self.t_i = t_i
-        self.v_curr = v_curr
-        self.sample_u = False
+        super(self).__init__(t_i, v_curr, sample_u=False)
         self.alpha_i = alpha_i
         self.n_i = n_i
 
@@ -63,31 +82,69 @@ class State:
               "sample_u": event.sample_u} for event in self.events])
         print("\n saving events:")
         print(df[:2].values)
-        # folder = "/home/psupriya/MY_HOME/tpprl_finance/dataset/"
-        folder = "/home/supriya/MY_HOME/MPI-SWS/dataset/"
+        folder = "/home/psupriya/MY_HOME/tpprl_finance/dataset/"
+        # folder = "/home/supriya/MY_HOME/MPI-SWS/dataset/"
         df.to_csv(folder + output_file, index=False)
         return df
 
 
-class SimpleTrading:
-    def __init__(self):
+class SimpleStrategy:
+    def __init__(self, time_between_trades_secs=5):
         self.current_amt = MAX_AMT
         self.owned_shares = 0
+        self.start_time = None
+        self.own_events = 1
+        self.time_between_trades_secs = time_between_trades_secs
 
-    def get_next_action(self, event):
-        t_i = event.t_i + 5
-        return t_i
+    def get_next_action_time(self, event):
+        if self.start_time is None:
+            # This is the first event
+            self.start_time = event.t_i
+
+        if event.is_trade_event():
+            self.own_events += 1
+
+        return self.start_time + self.own_events * self.time_between_trades_secs
+
+    def get_next_action_item(self):
+        return 0,0
 
 
-class BollingerBandTrading:
-    def __init__(self):
-
+class BollingerBandStrategy:
+    def __init__(self, window, num_std):
         self.current_amt = MAX_AMT
         self.owned_shares = 0
+        self.window = window
+        self.num_std = num_std
+        self.history = deque(maxlen=self.window)
+        self.bollinger_band = None
 
-    def get_next_action(self, event):
-        t_i = event.t_i + 5
+    def get_next_action_time(self, event):
+        t_i = event.t_i
+        self.history.append(event.v_curr)
+        if len(self.history) < self.window:
+            return np.inf
         return t_i
+
+    def get_next_action_item(self, event):
+        self.bollinger_band = pd.DataFrame(list(self.history),columns=["price"])
+        rolling_mean = self.bollinger_band["price"].rolling(window=self.window).mean()
+        rolling_std = self.bollinger_band["price"].rolling(window=self.window).std()
+
+        self.bollinger_band["Bollinger_High"] = rolling_mean + (rolling_std * self.num_std)
+        self.bollinger_band["Bollinger_Low"] = rolling_mean - (rolling_std * self.num_std)
+
+        if self.bollinger_band.price < self.bollinger_band.Bollinger_Low and self.get_current_amt() > self.bollinger_band.price:
+            event.alpha_i = 0  # buy if current price is less than Bollinger Lower Band
+            event.n_i = 1
+        elif self.bollinger_band.price > self.bollinger_band.Bollinger_High and self.get_owned_shares() > 0:
+            event.alpha_i = 1  # sell if current price is more than Bollinger Higher Band
+            event.n_i = 1
+        else:
+            event.alpha_i = -1
+            event.t_i = np.inf
+            event.n_i = 0
+        return event
 
     def get_owned_shares(self):
         return self.owned_shares
@@ -104,7 +161,7 @@ class BollingerBandTrading:
             self.current_amt += event.n_i * event.v_curr
 
 
-class RLTrading:
+class RLStrategy:
     def __init__(self, wt, W_t, Wb_alpha, Ws_alpha, Wn_b, Wn_s,
                  W_h, W_1, W_2, W_3, b_t, b_alpha, bn_b, bn_s, b_h,
                  V_t, Vh_alpha, Vv_alpha, Va_b, Va_s):
@@ -137,7 +194,7 @@ class RLTrading:
         self.owned_shares = 0
         self.u = np.random.uniform()
 
-    def get_next_action(self, event):
+    def get_next_action_time(self, event):
 
         # if this method is called after buying/selling action, then sample new u
         # if event.sample_u:
@@ -202,14 +259,7 @@ class BollingerBandEnvironment:
             self.tick_data = self.raw_data.groupby(self.raw_data["datetime"], as_index=False).last()
         elif self.time_gap == 'second':
             self.tick_data = self.raw_data.groupby(self.raw_data["datetime"], as_index=False).last()
-            window = 20
-            num_std = 2
-            rolling_mean = raw_data["price"].rolling(window=window, min_periods=1).mean()
-            rolling_std = raw_data["price"].rolling(window=window, min_periods=1).std()
-            self.tick_data["Bollinger_High"] = rolling_mean + (rolling_std * num_std)
-            self.tick_data["Bollinger_Low"] = rolling_mean - (rolling_std * num_std)
-            self.tick_data["Bollinger_High"].iloc[0] = self.tick_data["price"].iloc[0]
-            self.tick_data["Bollinger_Low"].iloc[0] = self.tick_data["price"].iloc[0]
+
             print(self.tick_data.head())
         else:
             raise ValueError("Time gap value '{}' not understood.".format(self.time_gap))
@@ -218,31 +268,30 @@ class BollingerBandEnvironment:
         return self.state
 
     def simulator_bollinger(self):
-        last_event = ReadEvent(t_i=1254130200, v_curr=50.79, alpha_i=-1, n_i=0)
-        v_last = last_event.v_curr
+        row_iterator = self.tick_data.iterrows()
+        first_tick = next(row_iterator)
+
+        current_event = TickFeedback(t_i=first_tick.time, v_curr=first_tick.price, alpha_i=-1, n_i=0)
+        v_last = current_event.v_curr
         print("trading..")
-        for (_idx, row) in self.tick_data.iterrows():
+
+        for (_idx, next_tick) in row_iterator:
             while True:  # self.state.time <= self.T:
-                next_agent_action_time = self.agent.get_next_action(last_event)
-                if next_agent_action_time > row.datetime:
-                    last_event = ReadEvent(t_i=row.datetime, v_curr=row.price, alpha_i=-1, n_i=0)
+                next_agent_action_time = self.agent.get_next_action_time(current_event)
+                if next_agent_action_time > next_tick.datetime:
+                    current_event = TickFeedback(t_i=next_tick.datetime, v_curr=next_tick.price, alpha_i=-1, n_i=0)
                     # print("\nreading market value at time {}\n".format(last_event.t_i))
                     break
                 else:
-                    if row.price < row.Bollinger_Low and self.agent.get_current_amt() > row.price:
-                        alpha_i = 0  # buy if current price is less than Bollinger Lower Band
-                    elif row.price > row.Bollinger_High and self.agent.get_owned_shares() > 0:
-                        alpha_i = 1  # sell if current price is more than Bollinger Higher Band
-                    else:
-                        if last_event.alpha_i == 0:
-                            alpha_i = 1  # else switch between buying and selling
-                        else:
-                            alpha_i = 0
-                    last_event = ActionEvent(t_i=next_agent_action_time, v_curr=row.price, alpha_i=alpha_i, n_i=1)
-                    self.agent.update_owned_shares(last_event)
+                    current_event = self.agent.get_next_action_item(current_event)
+                    if current_event.t_i == np.inf:
+                        break
+                    current_event = TradeFeedback(t_i=current_event.t_i, v_curr=next_tick.price,
+                                                  alpha_i=current_event.alpha_i, n_i=current_event.n_i)
+                    self.agent.update_owned_shares(current_event)
 
-                self.state.apply_event(last_event)
-                v_last = last_event.v_curr
+                self.state.apply_event(current_event)
+                v_last = current_event.v_curr
         return v_last
 
 
@@ -268,25 +317,27 @@ class SimpleEnvironment:
         return self.state
 
     def simulator_simple(self):
-        last_event = ReadEvent(t_i=1254130200, v_curr=50.79, alpha_i=1, n_i=1)
-        v_last = last_event.v_curr
+        row_iterator = self.tick_data.iterrows()
+        first_tick = next(row_iterator)
+
+        current_event = TickFeedback(t_i=first_tick.time, v_curr=first_tick.price, alpha_i=-1, n_i=0)
+        v_last = current_event.v_curr
         print("trading..")
-        for (_idx, row) in self.tick_data.iterrows():
+        for (_idx, next_tick) in self.tick_data.iterrows():
             while self.state.time <= self.T:
-                next_agent_action = self.agent.get_next_action(last_event)
-                if next_agent_action > row.datetime:
-                    last_event = ReadEvent(t_i=row.datetime, v_curr=row.price, alpha_i=last_event.alpha_i, n_i=1)
+                next_agent_action = self.agent.get_next_action(current_event)
+                if next_agent_action > next_tick.datetime:
+                    current_event = TickFeedback(t_i=next_tick.datetime, v_curr=next_tick.price, alpha_i=current_event.alpha_i, n_i=1)
                     # print("\nreading market value at time {}\n".format(last_event.t_i))
                     break
                 else:
-                    last_event = ActionEvent(t_i=next_agent_action, v_curr=row.price,
-                                             alpha_i=int(last_event.alpha_i) ^ 1, n_i=1)
+                    current_event = TradeFeedback(t_i=next_agent_action, v_curr=next_tick.price,
+                                               alpha_i=int(current_event.alpha_i) ^ 1, n_i=1)
                     # save only action events
                     # print("\ntaking action at time {}".format(last_event.t_i))
-                    self.state.apply_event(last_event)
-                v_last = last_event.v_curr
+                    self.state.apply_event(current_event)
+                v_last = current_event.v_curr
         return v_last
-
 
 
 def read_raw_data():
@@ -303,7 +354,7 @@ if __name__ == '__main__':
     raw_data = read_raw_data()
 
     # initiate agent/broadcaster
-    agent = BollingerBandTrading()
+    agent = BollingerBandStrategy(window=20, num_std=2)
 
     # start time is set to '2009-09-28 09:30:00' i.e. 9:30 am of 28sept2009
     # max time T is set to '2009-09-28 16:00:00' i.e. same day 4pm
