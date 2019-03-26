@@ -69,3 +69,4 @@ tpprl-log*/
 
 .mypy_cache/
 .idea/
+my_scripts.py
