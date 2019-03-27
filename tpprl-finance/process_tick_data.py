@@ -8,6 +8,8 @@ from collections import deque
 HIDDEN_LAYER_DIM = 8
 MAX_AMT = 1000.0
 MAX_SHARE = 100
+BASE_CHARGES = 1.0
+PERCENTAGE_CHARGES = 0.001
 
 
 def reward_fn(events, v_last):
@@ -21,6 +23,8 @@ def reward_fn(events, v_last):
         elif event.alpha_i == 1:
             reward += event.n_i * event.v_curr
             owned_shares -= event.n_i
+        reward -= BASE_CHARGES
+        reward -= (event.n_i * event.v_curr * PERCENTAGE_CHARGES)
     reward += owned_shares * v_last
     return reward
 
@@ -135,7 +139,11 @@ class SimpleStrategy(Strategy):
         else:
             alpha_i = int(self.last_action) ^ 1
             n_i = 1
-
+        # subtract the fixed transaction charges
+        self.current_amt -= BASE_CHARGES
+        # subtract the percentage transaction charges
+        self.current_amt -= event.v_curr * n_i * PERCENTAGE_CHARGES
+        assert self.current_amt > 0
         return alpha_i, n_i
 
 
@@ -182,6 +190,11 @@ class BollingerBandStrategy(Strategy):
             alpha_i = 1  # sell if current price is more than Bollinger Higher Band
         else:
             n_i = 0
+        # subtract the fixed transaction charges
+        self.current_amt -= BASE_CHARGES
+        # subtract the percentage transaction charges
+        self.current_amt -= event.v_curr * n_i * PERCENTAGE_CHARGES
+        assert self.current_amt > 0
         return alpha_i, n_i
 
 
@@ -212,7 +225,11 @@ class RLStrategy(Strategy):
         self.Va_b = Va_b
         self.Va_s = Va_s
 
+        self.tau_i = np.zeros((HIDDEN_LAYER_DIM,1))
+        self.b_i = np.zeros((HIDDEN_LAYER_DIM, 1))
+        self.eta_i = np.zeros((HIDDEN_LAYER_DIM, 1))
         self.h_i = np.zeros((HIDDEN_LAYER_DIM,1))
+        self.u_theta_t = 0
         self.last_time = 0.0
         self.curr_time = None
         self.Q = 1.0
@@ -238,59 +255,92 @@ class RLStrategy(Strategy):
             self.Q *= (1 - self.cdf(self.curr_time))
 
         self.last_price = event.v_curr
+        self.last_time = event.t_i
         # sample t_i
         self.c1 = np.exp(np.array(self.Vt_h).dot(self.h_i) + (self.Vt_v * (self.curr_price - self.last_price)) + self.b_lambda)
         D = 1 - (self.wt / np.exp(self.c1)) * np.log((1 - self.u) / self.Q)
+        assert D > 0
         t_i = self.last_time + (1 / self.wt) * np.log(D)
         t_i = np.asarray(t_i).squeeze()
         self.curr_time = t_i
 
+        assert self.curr_time >= self.last_time
+
         # update the log likelihood
-        u_theta_0 = np.exp((self.Vt_h * self.h_i) + self.b_lambda)
-        u_theta_t = np.exp((self.Vt_h * self.h_i) + (self.wt * t_i) + self.b_lambda)
-        self.loglikelihood += (u_theta_t - u_theta_0) / self.wt
+        u_theta_0 = np.squeeze(np.exp((self.Vt_h.dot(self.h_i)) + self.b_lambda))
+        self.u_theta_t = np.squeeze(np.exp((self.Vt_h.dot(self.h_i)) + (self.wt * (self.curr_time-self.last_time)) + self.b_lambda))
+
+        # calculate log likelihood
+        self.loglikelihood += np.squeeze((self.u_theta_t - u_theta_0) / self.wt)  # prob of no event happening
         return t_i
 
     def get_next_action_item(self, event):
         self.curr_price = event.v_curr
-        # encode event details
-        tau_i = np.array(self.W_t).dot((event.t_i - self.last_time)) + self.b_t
-        b_i = np.array(self.Wb_alpha).dot(1 - event.alpha_i) + np.array(self.Ws_alpha).dot(event.alpha_i) + self.b_alpha
-        if event.alpha_i == 0:
-            eta_i = np.array(self.Wn_b).dot(event.n_i) + self.bn_b
-        else:
-            eta_i = np.array(self.Wn_s).dot(event.n_i) + self.bn_s
-
         # update h_i
-        self.h_i = np.tanh(np.array(self.W_h).dot(self.h_i) + np.array(self.W_1).dot(tau_i)
-                           + np.array(self.W_2).dot(b_i) + np.array(self.W_3).dot(eta_i) + self.b_h)
+        self.h_i = np.tanh(np.array(self.W_h).dot(self.h_i) + np.array(self.W_1).dot(self.tau_i)
+                           + np.array(self.W_2).dot(self.b_i) + np.array(self.W_3).dot(self.eta_i) + self.b_h)
         # sample alpha_i
         prob_alpha = 1 / (1 + np.exp(
             -np.array(self.Vh_alpha).dot(self.h_i) - np.array(self.Vv_alpha).dot((self.curr_price - self.last_price))))
-        alpha_i = np.random.choice(np.array([0, 1]), p=prob_alpha)
+        alpha_i = np.random.choice(np.array([0, 1]), p=np.squeeze(prob_alpha))
+
+        # subtract the fixed transaction charges
+        self.current_amt -= BASE_CHARGES
+        assert self.current_amt > 0
         if alpha_i == 0:
             A = np.array(self.Va_b).dot(self.h_i)
-            max_share_buy = min(MAX_SHARE, np.floor(self.current_amt / event.v_curr)) + 1  # to allow buying zero shares
-            mask = np.append(np.ones(max_share_buy), np.zeros(MAX_SHARE + 1 - max_share_buy))  # total size is 101
-            masked_A = mask * A
-            exp = np.exp(masked_A)
-            prob = exp / np.sum(exp)
-            n_i = np.random.choice(np.arange(MAX_SHARE), p=prob)
+            A = np.append(np.array([[1]]), A, axis=0)
+
+            # calculate mask
+            max_share_buy = min(MAX_SHARE, int(np.floor(self.current_amt / (event.v_curr+PERCENTAGE_CHARGES))))+1  # to allow buying zero shares
+            mask = np.expand_dims(np.append(np.ones(max_share_buy), np.zeros(MAX_SHARE+1 - max_share_buy)), axis=1)  # total size is 101
+
+            # apply mask
+            masked_A = np.multiply(mask, A)
+            masked_A[:max_share_buy] = np.exp(masked_A[:max_share_buy])
+            prob_n = masked_A / np.sum(masked_A[:max_share_buy])
+            prob_n = np.squeeze(prob_n)
+
+            # sample
+            n_i = np.random.choice(np.arange(MAX_SHARE+1), p=np.squeeze(prob_n))
             self.owned_shares += n_i
-            self.current_amt -= event.v_curr * n_i
+            a = event.v_curr * n_i
+            self.current_amt -= a
+            assert self.current_amt > 0
         else:
             A = np.array(self.Va_b).dot(self.h_i)
-            max_share_sell = min(MAX_SHARE, self.owned_shares) + 1  # to allow buying zero shares
-            mask = np.append(np.ones(max_share_sell), np.zeros(MAX_SHARE + 1 - max_share_sell))  # total size is 101
-            masked_A = mask * A
-            exp = np.exp(masked_A)
-            prob_n = exp / np.sum(exp)
-            n_i = np.random.choice(np.arange(MAX_SHARE), p=prob_n)
+            A = np.append(np.array([[1]]), A, axis=0)
+            num_share_sell = int((self.owned_shares*event.v_curr)/(event.v_curr+PERCENTAGE_CHARGES))
+            max_share_sell = min(MAX_SHARE, num_share_sell)+1  # to allow buying zero shares
+            mask = np.expand_dims(np.append(np.ones(max_share_sell), np.zeros(MAX_SHARE+1-max_share_sell)), axis=1)  # total size is 101
+
+            # apply mask
+            masked_A = np.multiply(mask, A)
+            masked_A[:max_share_sell] = np.exp(masked_A[:max_share_sell])
+            prob_n = masked_A / np.sum(masked_A[:max_share_sell])
+            prob_n = np.squeeze(prob_n)
+
+            # sample
+            n_i = np.random.choice(np.arange(MAX_SHARE+1), p=np.squeeze(prob_n))
             self.owned_shares -= n_i
             self.current_amt += event.v_curr * n_i
+            assert self.current_amt > 0
 
+        # encode event details
+        self.tau_i = np.array(self.W_t).dot((self.curr_time - self.last_time)) + self.b_t
+        self.b_i = np.array(self.Wb_alpha).dot(1 - alpha_i) + np.array(self.Ws_alpha).dot(alpha_i) + self.b_alpha
+        if alpha_i == 0:
+            self.eta_i = np.array(self.Wn_b).dot(n_i) + self.bn_b
+        else:
+            self.eta_i = np.array(self.Wn_s).dot(n_i) + self.bn_s
+
+        # subtract the percentage transaction charges
+        a = event.v_curr * n_i * PERCENTAGE_CHARGES
+        self.current_amt -= a
+        assert self.current_amt > 0
         # update log likelihood
-        self.loglikelihood += prob_alpha[alpha_i] + prob_n[n_i]
+        self.loglikelihood += np.squeeze(np.log(self.u_theta_t) + prob_alpha[alpha_i] + prob_n[n_i])
+
         return alpha_i, n_i
 
     def cdf(self, t):
@@ -336,7 +386,8 @@ class Environment:
         for (_idx, next_tick) in row_iterator:
             while self.state.time <= self.T:
                 next_agent_action_time = self.agent.get_next_action_time(current_event)
-                if next_agent_action_time > next_tick.datetime:
+                # check if there is enough amount to buy at least one share at current price
+                if self.agent.current_amt <= (BASE_CHARGES+next_tick.price*PERCENTAGE_CHARGES) or next_agent_action_time > next_tick.datetime:
                     current_event = TickFeedback(t_i=next_tick.datetime, v_curr=next_tick.price)
                     # print("reading market value at time {}".format(current_event.t_i))
                     break
@@ -358,7 +409,7 @@ def read_raw_data():
     # folder = "/home/psupriya/MY_HOME/tpprl_finance/dataset/"
     # folder = "/home/supriya/MY_HOME/MPI-SWS/dataset"
     folder = "/NL/tpprl-result/work/rl-finance/"
-    raw = pd.read_csv(folder + "/first_hour_data.csv")  # header names=['datetime', 'price'])
+    raw = pd.read_csv(folder + "/hourly_data/0_hour.csv")  # header names=['datetime', 'price'])
     df = pd.DataFrame(raw)
     return df
 
@@ -374,7 +425,7 @@ if __name__ == '__main__':
     W_h = np.zeros((8, 8))
     W_1 = np.zeros((8, 8))
     W_2 = np.zeros((8, 8))
-    W_3 = np.zeros((8, 1))
+    W_3 = np.zeros((8, 8))
     b_t = np.zeros((8, 1))
     b_alpha = np.zeros((8, 1))
     bn_b = np.zeros((8, 1))
@@ -396,7 +447,10 @@ if __name__ == '__main__':
     mgr = Environment(T=1254133800, time_gap="second", raw_data=raw_data, agent=agent, start_time=1254130200)
     v_last = mgr.simulator()
 
-    output_file = "results_RL_strategy/output_event_RL.csv"
+    output_file = "results_RL_strategy/output_event_RL_0_hour.csv"
     event_df = mgr.get_state().get_dataframe(output_file)
     reward = reward_fn(events=event_df, v_last=v_last)
     print("reward = ", reward)
+    folder = "/NL/tpprl-result/work/rl-finance/"
+    with open(folder+"/results_RL_strategy/reward_0_hour.txt", "w") as rwd:
+        rwd.write("reward:{}".format(reward))
