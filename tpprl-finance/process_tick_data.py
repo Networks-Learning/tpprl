@@ -1,5 +1,5 @@
 """
-TODO: AttributeError: 'TickFeedback' object has no attribute 'alpha_i', line 257, in get_next_action_item
+TODO: negative reward??
 """
 import numpy as np
 import pandas as pd
@@ -39,10 +39,11 @@ class Action:
 
 
 class Feedback:
-    def __init__(self, t_i, v_curr, is_trade_feedback):
+    def __init__(self, t_i, v_curr, is_trade_feedback, event_curr_amt):
         self.t_i = t_i
         self.v_curr = v_curr
         self.is_trade_feedback = is_trade_feedback
+        self.event_curr_amt = event_curr_amt
 
     def is_trade_event(self):
         return self.is_trade_feedback
@@ -52,15 +53,15 @@ class Feedback:
 
 
 class TradeFeedback(Feedback):
-    def __init__(self, t_i, v_curr, alpha_i, n_i):
-        super(TradeFeedback, self).__init__(t_i, v_curr, is_trade_feedback=True)
+    def __init__(self, t_i, v_curr, alpha_i, n_i, event_curr_amt):
+        super(TradeFeedback, self).__init__(t_i, v_curr, is_trade_feedback=True, event_curr_amt=event_curr_amt)
         self.alpha_i = alpha_i
         self.n_i = n_i
 
 
 class TickFeedback(Feedback):
-    def __init__(self, t_i, v_curr):
-        super(TickFeedback, self).__init__(t_i, v_curr, is_trade_feedback=False)
+    def __init__(self, t_i, v_curr, event_curr_amt):
+        super(TickFeedback, self).__init__(t_i, v_curr, is_trade_feedback=False, event_curr_amt=event_curr_amt)
 
 
 class State:
@@ -82,12 +83,13 @@ class State:
               "alpha_i": event.alpha_i,
               "n_i": event.n_i,
               "v_curr": event.v_curr,
-              "is_trade_feedback": event.is_trade_feedback} for event in self.events])
+              "is_trade_feedback": event.is_trade_feedback,
+              "event_curr_amt": event.event_curr_amt} for event in self.events])
         print("\n saving events:")
         print(df[:2].values)
         # folder = "/home/psupriya/MY_HOME/tpprl_finance/dataset/"
-        # folder = "/home/supriya/MY_HOME/MPI-SWS/dataset/"
-        folder = "/NL/tpprl-result/work/rl-finance/"
+        folder = "/home/supriya/MY_HOME/MPI-SWS/dataset/"
+        # folder = "/NL/tpprl-result/work/rl-finance/"
         df.to_csv(folder + output_file, index=False)
         return df
 
@@ -104,12 +106,15 @@ class Strategy:
         return NotImplemented
 
     def update_owned_shares(self, event):
+        prev_amt = self.current_amt
         if event.alpha_i == 0:
             self.owned_shares += event.n_i
-            self.current_amt -= event.n_i * event.v_curr
+            # self.current_amt -= event.n_i * event.v_curr
         elif event.alpha_i == 1:
             self.owned_shares -= event.n_i
-            self.current_amt += event.n_i * event.v_curr
+            # self.current_amt += event.n_i * event.v_curr
+
+        assert self.current_amt>0
 
 
 class SimpleStrategy(Strategy):
@@ -139,8 +144,14 @@ class SimpleStrategy(Strategy):
         else:
             alpha_i = int(self.last_action) ^ 1
             n_i = 1
+        # update current amt
+        if alpha_i == 0:
+            self.current_amt -= n_i * event.v_curr
+        elif alpha_i == 1:
+            self.current_amt += n_i * event.v_curr
         # subtract the fixed transaction charges
-        self.current_amt -= BASE_CHARGES
+        if n_i != 0:
+            self.current_amt -= BASE_CHARGES
         # subtract the percentage transaction charges
         self.current_amt -= event.v_curr * n_i * PERCENTAGE_CHARGES
         assert self.current_amt > 0
@@ -190,8 +201,14 @@ class BollingerBandStrategy(Strategy):
             alpha_i = 1  # sell if current price is more than Bollinger Higher Band
         else:
             n_i = 0
+        # update current amt
+        if alpha_i == 0:
+            self.current_amt -= n_i * event.v_curr
+        elif alpha_i == 1:
+            self.current_amt += n_i * event.v_curr
         # subtract the fixed transaction charges
-        self.current_amt -= BASE_CHARGES
+        if n_i != 0:
+            self.current_amt -= BASE_CHARGES
         # subtract the percentage transaction charges
         self.current_amt -= event.v_curr * n_i * PERCENTAGE_CHARGES
         assert self.current_amt > 0
@@ -202,6 +219,7 @@ class RLStrategy(Strategy):
     def __init__(self, wt, W_t, Wb_alpha, Ws_alpha, Wn_b, Wn_s,
                  W_h, W_1, W_2, W_3, b_t, b_alpha, bn_b, bn_s, b_h,
                  Vt_h, Vt_v, b_lambda, Vh_alpha, Vv_alpha, Va_b, Va_s):
+        super(RLStrategy, self).__init__()
         self.wt = wt
         self.W_t = W_t
         self.Wb_alpha = Wb_alpha
@@ -234,8 +252,6 @@ class RLStrategy(Strategy):
         self.curr_time = None
         self.Q = 1.0
         self.c1 = 1.0
-        self.current_amt = MAX_AMT
-        self.owned_shares = 0
         self.u = np.random.uniform()
         self.last_price = None
         self.curr_price = None
@@ -247,22 +263,29 @@ class RLStrategy(Strategy):
         if self.curr_price is None:
             # This is the first event
             self.curr_price = event.v_curr
+            self.last_price = 0
 
+        if self.current_amt <= (BASE_CHARGES + event.v_curr * PERCENTAGE_CHARGES):
+            return np.inf
+
+        prev_q = self.Q
         if event.is_trade_feedback or self.curr_time is None:
             self.u = np.random.uniform()
             self.Q = 1
         else:
-            self.Q *= (1 - self.cdf(self.curr_time))
+            self.Q *= (1 - self.cdf(event.t_i))
 
-        self.last_price = event.v_curr
-        self.last_time = event.t_i
         # sample t_i
         self.c1 = np.exp(np.array(self.Vt_h).dot(self.h_i) + (self.Vt_v * (self.curr_price - self.last_price)) + self.b_lambda)
         D = 1 - (self.wt / np.exp(self.c1)) * np.log((1 - self.u) / self.Q)
-        assert D > 0
-        t_i = self.last_time + (1 / self.wt) * np.log(D)
-        t_i = np.asarray(t_i).squeeze()
-        self.curr_time = t_i
+        a = np.squeeze((1-self.u)/self.Q)
+        assert a<1
+        assert np.log(D) > 0
+
+        self.last_time = event.t_i
+        new_t_i = self.last_time + (1 / self.wt) * np.log(D)
+        new_t_i = np.asarray(new_t_i).squeeze()
+        self.curr_time = new_t_i
 
         assert self.curr_time >= self.last_time
 
@@ -272,9 +295,10 @@ class RLStrategy(Strategy):
 
         # calculate log likelihood
         self.loglikelihood += np.squeeze((self.u_theta_t - u_theta_0) / self.wt)  # prob of no event happening
-        return t_i
+        return self.curr_time
 
     def get_next_action_item(self, event):
+        self.last_price = self.curr_price
         self.curr_price = event.v_curr
         # update h_i
         self.h_i = np.tanh(np.array(self.W_h).dot(self.h_i) + np.array(self.W_1).dot(self.tau_i)
@@ -292,7 +316,7 @@ class RLStrategy(Strategy):
             A = np.append(np.array([[1]]), A, axis=0)
 
             # calculate mask
-            max_share_buy = min(MAX_SHARE, int(np.floor(self.current_amt / (event.v_curr+PERCENTAGE_CHARGES))))+1  # to allow buying zero shares
+            max_share_buy = min(MAX_SHARE, int(np.floor(self.current_amt / (event.v_curr+(event.v_curr*PERCENTAGE_CHARGES)))))+1  # to allow buying zero shares
             mask = np.expand_dims(np.append(np.ones(max_share_buy), np.zeros(MAX_SHARE+1 - max_share_buy)), axis=1)  # total size is 101
 
             # apply mask
@@ -303,14 +327,14 @@ class RLStrategy(Strategy):
 
             # sample
             n_i = np.random.choice(np.arange(MAX_SHARE+1), p=np.squeeze(prob_n))
-            self.owned_shares += n_i
-            a = event.v_curr * n_i
-            self.current_amt -= a
-            assert self.current_amt > 0
+            # self.owned_shares += n_i
+            # a = event.v_curr * n_i
+            # self.current_amt -= a
+            # assert self.current_amt > 0
         else:
             A = np.array(self.Va_b).dot(self.h_i)
             A = np.append(np.array([[1]]), A, axis=0)
-            num_share_sell = int((self.owned_shares*event.v_curr)/(event.v_curr+PERCENTAGE_CHARGES))
+            num_share_sell = int((self.owned_shares*event.v_curr)/(event.v_curr+(event.v_curr*PERCENTAGE_CHARGES)))
             max_share_sell = min(MAX_SHARE, num_share_sell)+1  # to allow buying zero shares
             mask = np.expand_dims(np.append(np.ones(max_share_sell), np.zeros(MAX_SHARE+1-max_share_sell)), axis=1)  # total size is 101
 
@@ -322,9 +346,9 @@ class RLStrategy(Strategy):
 
             # sample
             n_i = np.random.choice(np.arange(MAX_SHARE+1), p=np.squeeze(prob_n))
-            self.owned_shares -= n_i
-            self.current_amt += event.v_curr * n_i
-            assert self.current_amt > 0
+            # self.owned_shares -= n_i
+            # self.current_amt += event.v_curr * n_i
+            # assert self.current_amt > 0
 
         # encode event details
         self.tau_i = np.array(self.W_t).dot((self.curr_time - self.last_time)) + self.b_t
@@ -334,8 +358,18 @@ class RLStrategy(Strategy):
         else:
             self.eta_i = np.array(self.Wn_s).dot(n_i) + self.bn_s
 
+        # update current amt
+        if alpha_i == 0:
+            self.current_amt -= n_i * event.v_curr
+        elif alpha_i == 1:
+            self.current_amt += n_i * event.v_curr
+
+        # if n_i=0 i.e. there was no trade, add the base charges, which was previously deducted
+        if n_i == 0:
+            self.current_amt += BASE_CHARGES
         # subtract the percentage transaction charges
         a = event.v_curr * n_i * PERCENTAGE_CHARGES
+        assert self.current_amt>a
         self.current_amt -= a
         assert self.current_amt > 0
         # update log likelihood
@@ -379,7 +413,7 @@ class Environment:
     def simulator(self):
         row_iterator = self.tick_data.iterrows()
         first_tick = next(row_iterator)[1]
-        current_event = TickFeedback(t_i=first_tick.datetime, v_curr=first_tick.price)
+        current_event = TickFeedback(t_i=first_tick.datetime, v_curr=first_tick.price, event_curr_amt = self.agent.current_amt)
         v_last = current_event.v_curr
         print("trading..")
 
@@ -387,15 +421,16 @@ class Environment:
             while self.state.time <= self.T:
                 next_agent_action_time = self.agent.get_next_action_time(current_event)
                 # check if there is enough amount to buy at least one share at current price
-                if self.agent.current_amt <= (BASE_CHARGES+next_tick.price*PERCENTAGE_CHARGES) or next_agent_action_time > next_tick.datetime:
-                    current_event = TickFeedback(t_i=next_tick.datetime, v_curr=next_tick.price)
+                if next_agent_action_time > next_tick.datetime:
+                    current_event = TickFeedback(t_i=next_tick.datetime, v_curr=next_tick.price, event_curr_amt = self.agent.current_amt)
                     # print("reading market value at time {}".format(current_event.t_i))
                     break
                 else:
                     # TODO update price: interpolate
+                    trade_price = current_event.v_curr
                     alpha_i, n_i = self.agent.get_next_action_item(current_event)
-                    current_event = TradeFeedback(t_i=next_agent_action_time, v_curr=next_tick.price,
-                                                  alpha_i=alpha_i, n_i=n_i)
+                    current_event = TradeFeedback(t_i=next_agent_action_time, v_curr=trade_price,
+                                                  alpha_i=alpha_i, n_i=n_i, event_curr_amt = self.agent.current_amt)
                     self.agent.update_owned_shares(current_event)
 
                 self.state.apply_event(current_event)
@@ -407,9 +442,10 @@ def read_raw_data():
     """ read raw_data """
     print("reading raw data")
     # folder = "/home/psupriya/MY_HOME/tpprl_finance/dataset/"
-    # folder = "/home/supriya/MY_HOME/MPI-SWS/dataset"
-    folder = "/NL/tpprl-result/work/rl-finance/"
-    raw = pd.read_csv(folder + "/hourly_data/0_hour.csv")  # header names=['datetime', 'price'])
+    folder = "/home/supriya/MY_HOME/MPI-SWS/dataset"
+    # folder = "/NL/tpprl-result/work/rl-finance/"
+    # raw = pd.read_csv(folder + "/hourly_data/0_hour.csv")  # header names=['datetime', 'price'])
+    raw = pd.read_csv(folder + "/0_day.csv")
     df = pd.DataFrame(raw)
     return df
 
@@ -447,10 +483,11 @@ if __name__ == '__main__':
     mgr = Environment(T=1254133800, time_gap="second", raw_data=raw_data, agent=agent, start_time=1254130200)
     v_last = mgr.simulator()
 
-    output_file = "results_RL_strategy/output_event_RL_0_hour.csv"
+    output_file = "output_28Mar/output_event_RL_0_day.csv"
     event_df = mgr.get_state().get_dataframe(output_file)
     reward = reward_fn(events=event_df, v_last=v_last)
     print("reward = ", reward)
-    folder = "/NL/tpprl-result/work/rl-finance/"
-    with open(folder+"/results_RL_strategy/reward_0_hour.txt", "w") as rwd:
+    # folder = "/NL/tpprl-result/work/rl-finance/"
+    folder = "/home/supriya/MY_HOME/MPI-SWS/dataset"
+    with open(folder+"/output_28Mar/reward_0_day.txt", "w") as rwd:
         rwd.write("reward:{}".format(reward))
