@@ -273,11 +273,11 @@ class RLStrategy(Strategy):
             # This is the first event
             self.curr_price = event.v_curr
             self.last_price = 0
-
+        # TODO: empty trade, cal alphai and put ni=0
         if self.current_amt <= (BASE_CHARGES + event.v_curr * PERCENTAGE_CHARGES):
             return np.inf
 
-        prev_q = self.Q
+        # prev_q = self.Q
         if event.is_trade_feedback or self.curr_time is None:
             self.u = np.random.uniform()
             self.Q = 1
@@ -303,6 +303,8 @@ class RLStrategy(Strategy):
         self.u_theta_t = np.squeeze(np.exp((self.Vt_h.dot(self.h_i)) + (self.wt * (self.curr_time-self.last_time)) + self.b_lambda))
 
         # calculate log likelihood
+        # TODO: current amount, portfolio: num of share in possession, v_curr
+
         self.loglikelihood += np.squeeze((self.u_theta_t - u_theta_0) / self.wt)  # prob of no event happening
         return self.curr_time
 
@@ -394,6 +396,7 @@ class RLStrategy(Strategy):
             return 1 - np.exp((np.exp(self.c1) / self.wt) * (1 - np.exp(self.wt * (t - self.last_time))))
 
     def get_LL(self):
+        # TODO: simulation end time
         return self.loglikelihood
 
 
@@ -444,7 +447,9 @@ class Environment:
 
                 self.state.apply_event(current_event)
                 v_last = current_event.v_curr
+        print("LL:",self.agent.get_LL())
         return v_last
+
 
 
 def read_raw_data():
