@@ -11,6 +11,10 @@ MAX_SHARE = 100
 BASE_CHARGES = 1.0
 PERCENTAGE_CHARGES = 0.001
 
+folder = "/NL/tpprl-result/work/rl-finance/"
+# folder = "/home/supriya/MY_HOME/MPI-SWS/dataset/"
+# folder = "/NL/tpprl-result/work/rl-finance/"
+
 
 def reward_fn(events, v_last):
     reward = MAX_AMT
@@ -87,9 +91,6 @@ class State:
               "event_curr_amt": event.event_curr_amt} for event in self.events])
         print("\n saving events:")
         print(df[:2].values)
-        # folder = "/home/psupriya/MY_HOME/tpprl_finance/dataset/"
-        folder = "/home/supriya/MY_HOME/MPI-SWS/dataset/"
-        # folder = "/NL/tpprl-result/work/rl-finance/"
         df.to_csv(folder + output_file, index=False)
         return df
 
@@ -127,6 +128,9 @@ class SimpleStrategy(Strategy):
         print("Using Simple Strategy")
 
     def get_next_action_time(self, event):
+        if self.current_amt <= (event.v_curr + BASE_CHARGES + event.v_curr * PERCENTAGE_CHARGES):
+            return np.inf
+
         if self.start_time is None:
             # This is the first event
             self.start_time = event.t_i
@@ -176,6 +180,9 @@ class BollingerBandStrategy(Strategy):
         if len(self.history) < self.window:
             return np.inf
 
+        if self.current_amt <= (event.v_curr + BASE_CHARGES + event.v_curr * PERCENTAGE_CHARGES):
+            return np.inf
+
         # TODO: order one calculation
         self.bollinger_band = pd.DataFrame(list(self.history), columns=["price"])
         rolling_mean = self.bollinger_band["price"].rolling(window=self.window).mean()
@@ -210,6 +217,8 @@ class BollingerBandStrategy(Strategy):
         if n_i != 0:
             self.current_amt -= BASE_CHARGES
         # subtract the percentage transaction charges
+        a = event.v_curr * n_i * PERCENTAGE_CHARGES
+        assert self.current_amt>a
         self.current_amt -= event.v_curr * n_i * PERCENTAGE_CHARGES
         assert self.current_amt > 0
         return alpha_i, n_i
@@ -430,7 +439,7 @@ class Environment:
                     trade_price = current_event.v_curr
                     alpha_i, n_i = self.agent.get_next_action_item(current_event)
                     current_event = TradeFeedback(t_i=next_agent_action_time, v_curr=trade_price,
-                                                  alpha_i=alpha_i, n_i=n_i, event_curr_amt = self.agent.current_amt)
+                                                  alpha_i=alpha_i, n_i=n_i, event_curr_amt=self.agent.current_amt)
                     self.agent.update_owned_shares(current_event)
 
                 self.state.apply_event(current_event)
@@ -442,10 +451,10 @@ def read_raw_data():
     """ read raw_data """
     print("reading raw data")
     # folder = "/home/psupriya/MY_HOME/tpprl_finance/dataset/"
-    folder = "/home/supriya/MY_HOME/MPI-SWS/dataset"
+    # folder = "/home/supriya/MY_HOME/MPI-SWS/dataset"
     # folder = "/NL/tpprl-result/work/rl-finance/"
     # raw = pd.read_csv(folder + "/hourly_data/0_hour.csv")  # header names=['datetime', 'price'])
-    raw = pd.read_csv(folder + "/0_day.csv")
+    raw = pd.read_csv(folder + "/daily_data/0_day.csv")
     df = pd.DataFrame(raw)
     return df
 
@@ -482,12 +491,10 @@ if __name__ == '__main__':
     # max time T is set to '2009-09-28 16:00:00' i.e. same day 4pm: 1254153600
     mgr = Environment(T=1254133800, time_gap="second", raw_data=raw_data, agent=agent, start_time=1254130200)
     v_last = mgr.simulator()
-
-    output_file = "output_28Mar/output_event_RL_0_day.csv"
+    method = "RL"
+    output_file = "/results_{}_strategy/output_event_{}_0_day.csv".format(method, method)
     event_df = mgr.get_state().get_dataframe(output_file)
     reward = reward_fn(events=event_df, v_last=v_last)
     print("reward = ", reward)
-    # folder = "/NL/tpprl-result/work/rl-finance/"
-    folder = "/home/supriya/MY_HOME/MPI-SWS/dataset"
-    with open(folder+"/output_28Mar/reward_0_day.txt", "w") as rwd:
+    with open(folder+"/results_{}_strategy/reward_0_day.txt".format(method), "w") as rwd:
         rwd.write("reward:{}".format(reward))
