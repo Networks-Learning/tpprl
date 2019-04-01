@@ -227,8 +227,9 @@ class BollingerBandStrategy(Strategy):
 class RLStrategy(Strategy):
     def __init__(self, wt, W_t, Wb_alpha, Ws_alpha, Wn_b, Wn_s,
                  W_h, W_1, W_2, W_3, b_t, b_alpha, bn_b, bn_s, b_h,
-                 Vt_h, Vt_v, b_lambda, Vh_alpha, Vv_alpha, Va_b, Va_s):
+                 Vt_h, Vt_v, b_lambda, Vh_alpha, Vv_alpha, Va_b, Va_s, seed):
         super(RLStrategy, self).__init__()
+        self.RS = np.random.RandomState(seed)
         self.wt = wt
         self.W_t = W_t
         self.Wb_alpha = Wb_alpha
@@ -261,7 +262,7 @@ class RLStrategy(Strategy):
         self.curr_time = None
         self.Q = 1.0
         self.c1 = 1.0
-        self.u = np.random.uniform()
+        self.u = self.RS.uniform()
         self.last_price = None
         self.curr_price = None
         self.loglikelihood = 0
@@ -273,13 +274,10 @@ class RLStrategy(Strategy):
             # This is the first event
             self.curr_price = event.v_curr
             self.last_price = 0
-        # TODO: empty trade, cal alphai and put ni=0
-        if self.current_amt <= (BASE_CHARGES + event.v_curr * PERCENTAGE_CHARGES):
-            return np.inf
 
         # prev_q = self.Q
         if event.is_trade_feedback or self.curr_time is None:
-            self.u = np.random.uniform()
+            self.u = self.RS.uniform()
             self.Q = 1
         else:
             self.Q *= (1 - self.cdf(event.t_i))
@@ -303,14 +301,14 @@ class RLStrategy(Strategy):
         self.u_theta_t = np.squeeze(np.exp((self.Vt_h.dot(self.h_i)) + (self.wt * (self.curr_time-self.last_time)) + self.b_lambda))
 
         # calculate log likelihood
-        # TODO: current amount, portfolio: num of share in possession, v_curr
-
+        # TODO: save current amount, portfolio: num of share in possession, v_curr
         self.loglikelihood += np.squeeze((self.u_theta_t - u_theta_0) / self.wt)  # prob of no event happening
         return self.curr_time
 
     def get_next_action_item(self, event):
         self.last_price = self.curr_price
         self.curr_price = event.v_curr
+
         # update h_i
         self.h_i = np.tanh(np.array(self.W_h).dot(self.h_i) + np.array(self.W_1).dot(self.tau_i)
                            + np.array(self.W_2).dot(self.b_i) + np.array(self.W_3).dot(self.eta_i) + self.b_h)
@@ -319,6 +317,10 @@ class RLStrategy(Strategy):
             -np.array(self.Vh_alpha).dot(self.h_i) - np.array(self.Vv_alpha).dot((self.curr_price - self.last_price))))
         alpha_i = np.random.choice(np.array([0, 1]), p=np.squeeze(prob_alpha))
 
+        # return empty trade details when the balance is insufficient to make a trade
+        if self.current_amt <= (BASE_CHARGES + event.v_curr * PERCENTAGE_CHARGES):
+            n_i = 0
+            return alpha_i, n_i
         # subtract the fixed transaction charges
         self.current_amt -= BASE_CHARGES
         assert self.current_amt > 0
@@ -337,7 +339,7 @@ class RLStrategy(Strategy):
             prob_n = np.squeeze(prob_n)
 
             # sample
-            n_i = np.random.choice(np.arange(MAX_SHARE+1), p=np.squeeze(prob_n))
+            n_i = self.RS.choice(np.arange(MAX_SHARE+1), p=np.squeeze(prob_n))
             # self.owned_shares += n_i
             # a = event.v_curr * n_i
             # self.current_amt -= a
@@ -356,7 +358,7 @@ class RLStrategy(Strategy):
             prob_n = np.squeeze(prob_n)
 
             # sample
-            n_i = np.random.choice(np.arange(MAX_SHARE+1), p=np.squeeze(prob_n))
+            n_i = self.RS.choice(np.arange(MAX_SHARE+1), p=np.squeeze(prob_n))
             # self.owned_shares -= n_i
             # self.current_amt += event.v_curr * n_i
             # assert self.current_amt > 0
@@ -401,13 +403,13 @@ class RLStrategy(Strategy):
 
 
 class Environment:
-    def __init__(self, T, time_gap, raw_data, agent, start_time):
+    def __init__(self, T, time_gap, raw_data, agent, start_time, seed):
         self.T = T
         self.state = State(curr_time=start_time)
         self.time_gap = time_gap
         self.raw_data = raw_data
         self.agent = agent
-
+        self.RS = np.random.RandomState(seed)
         # for reading market value per minute
         if self.time_gap == "minute":
             # TODO need to find a way to group by minute using unix timestamp
@@ -434,7 +436,7 @@ class Environment:
                 next_agent_action_time = self.agent.get_next_action_time(current_event)
                 # check if there is enough amount to buy at least one share at current price
                 if next_agent_action_time > next_tick.datetime:
-                    current_event = TickFeedback(t_i=next_tick.datetime, v_curr=next_tick.price, event_curr_amt = self.agent.current_amt)
+                    current_event = TickFeedback(t_i=next_tick.datetime, v_curr=next_tick.price, event_curr_amt=self.agent.current_amt)
                     # print("reading market value at time {}".format(current_event.t_i))
                     break
                 else:
@@ -451,7 +453,6 @@ class Environment:
         return v_last
 
 
-
 def read_raw_data():
     """ read raw_data """
     print("reading raw data")
@@ -466,6 +467,7 @@ def read_raw_data():
 
 if __name__ == '__main__':
     raw_data = read_raw_data()
+    seed = 42
     wt = np.random.uniform(size=(1, 1))
     W_t = np.zeros((8, 1))
     Wb_alpha = np.zeros((8, 1))
@@ -491,10 +493,11 @@ if __name__ == '__main__':
     # initiate agent/broadcaster
     # agent = SimpleStrategy(time_between_trades_secs=5)
     # agent = BollingerBandStrategy(window=20, num_std=2)
-    agent = RLStrategy(wt, W_t, Wb_alpha, Ws_alpha, Wn_b, Wn_s, W_h, W_1, W_2, W_3, b_t, b_alpha, bn_b, bn_s, b_h, Vt_h, Vt_v, b_lambda, Vh_alpha, Vv_alpha, Va_b, Va_s)
+    agent = RLStrategy(wt, W_t, Wb_alpha, Ws_alpha, Wn_b, Wn_s, W_h, W_1, W_2, W_3, b_t,
+                       b_alpha, bn_b, bn_s, b_h, Vt_h, Vt_v, b_lambda, Vh_alpha, Vv_alpha, Va_b, Va_s, seed)
     # start time is set to '2009-09-28 09:30:00' i.e. 9:30 am of 28sept2009: 1254130200
     # max time T is set to '2009-09-28 16:00:00' i.e. same day 4pm: 1254153600
-    mgr = Environment(T=1254133800, time_gap="second", raw_data=raw_data, agent=agent, start_time=1254130200)
+    mgr = Environment(T=1254133800, time_gap="second", raw_data=raw_data, agent=agent, start_time=1254130200, seed=seed)
     v_last = mgr.simulator()
     method = "RL"
     output_file = "/results_{}_strategy/output_event_{}_0_day.csv".format(method, method)
