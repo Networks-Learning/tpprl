@@ -15,23 +15,6 @@ BASE_CHARGES = 1.0
 PERCENTAGE_CHARGES = 0.001
 
 
-def reward_fn(events, v_last):
-    reward = MAX_AMT
-    owned_shares = 0
-    print("calculating reward...")
-    for (_idx, event) in events.iterrows():
-        if event.alpha_i == 0:
-            reward -= event.n_i * event.v_curr
-            owned_shares += event.n_i
-        elif event.alpha_i == 1:
-            reward += event.n_i * event.v_curr
-            owned_shares -= event.n_i
-        reward -= BASE_CHARGES
-        reward -= (event.n_i * event.v_curr * PERCENTAGE_CHARGES)
-    reward += owned_shares * v_last
-    return reward
-
-
 class Action:
     def __init__(self, alpha, n):
         self.alpha = alpha
@@ -42,11 +25,12 @@ class Action:
 
 
 class Feedback:
-    def __init__(self, t_i, v_curr, is_trade_feedback, event_curr_amt):
+    def __init__(self, t_i, v_curr, is_trade_feedback, event_curr_amt, portfolio):
         self.t_i = t_i
         self.v_curr = v_curr
         self.is_trade_feedback = is_trade_feedback
         self.event_curr_amt = event_curr_amt
+        self.portfolio = portfolio
 
     def is_trade_event(self):
         return self.is_trade_feedback
@@ -56,42 +40,43 @@ class Feedback:
 
 
 class TradeFeedback(Feedback):
-    def __init__(self, t_i, v_curr, alpha_i, n_i, event_curr_amt):
-        super(TradeFeedback, self).__init__(t_i, v_curr, is_trade_feedback=True, event_curr_amt=event_curr_amt)
+    def __init__(self, t_i, v_curr, alpha_i, n_i, event_curr_amt, portfolio):
+        super(TradeFeedback, self).__init__(t_i, v_curr, is_trade_feedback=True, event_curr_amt=event_curr_amt, portfolio=portfolio)
         self.alpha_i = alpha_i
         self.n_i = n_i
 
 
 class TickFeedback(Feedback):
-    def __init__(self, t_i, v_curr, event_curr_amt):
-        super(TickFeedback, self).__init__(t_i, v_curr, is_trade_feedback=False, event_curr_amt=event_curr_amt)
+    def __init__(self, t_i, v_curr, event_curr_amt, portfolio):
+        super(TickFeedback, self).__init__(t_i, v_curr, is_trade_feedback=False, event_curr_amt=event_curr_amt, portfolio=portfolio)
+        self.alpha_i = 0
+        self.n_i = 0
 
-
-class State:
-    def __init__(self, curr_time):
-        self.time = curr_time
-        self.events = []
-
-    def apply_event(self, event):
-        self.events.append(event)
-        self.time = event.t_i
-        # if event.alpha_i == 0:
-        #     print("* BUY {} shares at price of {} at time {}".format(event.n_i, event.v_curr, event.t_i))
-        # else:
-        #     print("* SELL {} shares at price of {} at time {}".format(event.n_i, event.v_curr, event.t_i))
-
-    def get_dataframe(self, output_file):
-        df = pd.DataFrame.from_records(
-            [{"t_i": event.t_i,
-              "alpha_i": event.alpha_i,
-              "n_i": event.n_i,
-              "v_curr": event.v_curr,
-              "is_trade_feedback": event.is_trade_feedback,
-              "event_curr_amt": event.event_curr_amt} for event in self.events])
-        print("\n saving events:")
-        print(df[:2].values)
-        df.to_csv(SAVE_DIR + output_file, index=False)
-        return df
+# class State:
+#     def __init__(self, curr_time):
+#         self.time = curr_time
+#         self.events = []
+#
+#     def apply_event(self, event):
+#         self.events.append(event)
+#         self.time = event.t_i
+#         # if event.alpha_i == 0:
+#         #     print("* BUY {} shares at price of {} at time {}".format(event.n_i, event.v_curr, event.t_i))
+#         # else:
+#         #     print("* SELL {} shares at price of {} at time {}".format(event.n_i, event.v_curr, event.t_i))
+#
+#     def get_dataframe(self, output_file):
+#         df = pd.DataFrame.from_records(
+#             [{"t_i": event.t_i,
+#               "alpha_i": event.alpha_i,
+#               "n_i": event.n_i,
+#               "v_curr": event.v_curr,
+#               "is_trade_feedback": event.is_trade_feedback,
+#               "event_curr_amt": event.event_curr_amt} for event in self.events])
+#         print("\n saving events:")
+#         print(df[:2].values)
+#         df.to_csv(SAVE_DIR + output_file, index=False)
+#         return df
 
 
 class Strategy:
@@ -194,7 +179,7 @@ class RLStrategy(Strategy):
         self.u_theta_t = np.squeeze(np.exp((self.Vt_h.dot(self.h_i)) + (self.wt * (self.curr_time-self.last_time)) + self.b_lambda))
 
         # calculate log likelihood
-        # TODO: save current amount, portfolio: num of share in possession, v_curr
+        # TODO: save current amount, portfolio: num of share in possession, v_curr: DONE in Environment class
         self.loglikelihood += np.squeeze((self.u_theta_t - u_theta_0) / self.wt)  # prob of no event happening
         return self.curr_time
 
@@ -222,8 +207,10 @@ class RLStrategy(Strategy):
             A = np.append(np.array([[1]]), A, axis=0)
 
             # calculate mask
-            max_share_buy = min(MAX_SHARE, int(np.floor(self.current_amt / (event.v_curr+(event.v_curr*PERCENTAGE_CHARGES)))))+1  # to allow buying zero shares
-            mask = np.expand_dims(np.append(np.ones(max_share_buy), np.zeros(MAX_SHARE+1 - max_share_buy)), axis=1)  # total size is 101
+            max_share_buy = min(MAX_SHARE, int(np.floor(self.current_amt /
+                                                        (event.v_curr+(event.v_curr*PERCENTAGE_CHARGES)))))+1  # to allow buying zero shares
+            mask = np.expand_dims(np.append(np.ones(max_share_buy),
+                                            np.zeros(MAX_SHARE+1 - max_share_buy)), axis=1)  # total size is 101
 
             # apply mask
             masked_A = np.multiply(mask, A)
@@ -240,9 +227,11 @@ class RLStrategy(Strategy):
         else:
             A = np.array(self.Va_b).dot(self.h_i)
             A = np.append(np.array([[1]]), A, axis=0)
-            num_share_sell = int((self.owned_shares*event.v_curr)/(event.v_curr+(event.v_curr*PERCENTAGE_CHARGES)))
+            num_share_sell = int((self.owned_shares*event.v_curr)/
+                                 (event.v_curr+(event.v_curr*PERCENTAGE_CHARGES)))
             max_share_sell = min(MAX_SHARE, num_share_sell)+1  # to allow buying zero shares
-            mask = np.expand_dims(np.append(np.ones(max_share_sell), np.zeros(MAX_SHARE+1-max_share_sell)), axis=1)  # total size is 101
+            mask = np.expand_dims(np.append(np.ones(max_share_sell),
+                                            np.zeros(MAX_SHARE+1-max_share_sell)), axis=1)  # total size is 101
 
             # apply mask
             masked_A = np.multiply(mask, A)
@@ -275,11 +264,11 @@ class RLStrategy(Strategy):
             self.current_amt += BASE_CHARGES
         # subtract the percentage transaction charges
         a = event.v_curr * n_i * PERCENTAGE_CHARGES
-        assert self.current_amt>a
+        assert self.current_amt > a
         self.current_amt -= a
         assert self.current_amt > 0
         # update log likelihood
-        self.loglikelihood += np.squeeze(np.log(self.u_theta_t) + prob_alpha[alpha_i] + prob_n[n_i])
+        self.loglikelihood += np.squeeze(np.log(self.u_theta_t) + np.log(prob_alpha[alpha_i]) + np.log(prob_n[n_i]))
 
         return alpha_i, n_i
 
@@ -298,10 +287,20 @@ class RLStrategy(Strategy):
 class Environment:
     def __init__(self, T, time_gap, raw_data, agent, start_time, seed):
         self.T = T
-        self.state = State(curr_time=start_time)
+        # self.state = State(curr_time=start_time)
+        self.list_t_delta = []  # list of time delta
+        self.list_alpha_i = []  # list of alpha_i's
+        self.list_n_i = []  # list of n_i's
+        self.list_v_curr = []  # list of current share price
+        self.list_is_trade_feedback = []  # list of type of feedback: it is true if current event is trade
+        self.list_current_amount = []  # list of amount available after current trade
+        self.list_portfolio = []  # list of number of shares in possession
+        self.v_last = 0  # save final value of share, needed to calculate reward
+
         self.time_gap = time_gap
         self.raw_data = raw_data
         self.agent = agent
+        self.curr_time = start_time
         self.RS = np.random.RandomState(seed)
         # for reading market value per minute
         if self.time_gap == "minute":
@@ -314,36 +313,70 @@ class Environment:
         else:
             raise ValueError("Time gap value '{}' not understood.".format(self.time_gap))
 
-    def get_state(self):
-        return self.state
+    # def get_state(self):
+    #     return self.state
+    def apply_event(self, event):
+        self.list_t_delta.append(event.t_i-self.agent.last_time)
+        self.list_alpha_i.append(event.alpha_i)
+        self.list_n_i.append(event.n_i)
+        self.list_v_curr.append(event.v_curr)
+        self.list_is_trade_feedback.append(event.is_trade_feedback)
+        self.list_current_amount.append(event.event_curr_amt)
+        self.list_portfolio.append(event.portfolio)
 
     def simulator(self):
         row_iterator = self.tick_data.iterrows()
         first_tick = next(row_iterator)[1]
-        current_event = TickFeedback(t_i=first_tick.datetime, v_curr=first_tick.price, event_curr_amt = self.agent.current_amt)
-        v_last = current_event.v_curr
+        current_event = TickFeedback(t_i=first_tick.datetime, v_curr=first_tick.price,
+                                     event_curr_amt=self.agent.current_amt, portfolio=self.agent.owned_shares)
         print("trading..")
 
         for (_idx, next_tick) in row_iterator:
-            while self.state.time <= self.T:
+            while self.curr_time <= self.T:
                 next_agent_action_time = self.agent.get_next_action_time(current_event)
                 # check if there is enough amount to buy at least one share at current price
                 if next_agent_action_time > next_tick.datetime:
-                    current_event = TickFeedback(t_i=next_tick.datetime, v_curr=next_tick.price, event_curr_amt = self.agent.current_amt)
+                    current_event = TickFeedback(t_i=next_tick.datetime, v_curr=next_tick.price,
+                                                 event_curr_amt=self.agent.current_amt,
+                                                 portfolio=self.agent.owned_shares)
                     # print("reading market value at time {}".format(current_event.t_i))
-                    break
+                    # break
                 else:
                     # TODO update price: interpolate
                     trade_price = current_event.v_curr
                     alpha_i, n_i = self.agent.get_next_action_item(current_event)
                     current_event = TradeFeedback(t_i=next_agent_action_time, v_curr=trade_price,
-                                                  alpha_i=alpha_i, n_i=n_i, event_curr_amt=self.agent.current_amt)
+                                                  alpha_i=alpha_i, n_i=n_i, event_curr_amt=self.agent.current_amt,
+                                                  portfolio=self.agent.owned_shares)
                     self.agent.update_owned_shares(current_event)
 
-                self.state.apply_event(current_event)
-                v_last = current_event.v_curr
-        print("LL:",self.agent.get_LL())
-        return v_last
+                self.apply_event(current_event)
+                self.v_last = current_event.v_curr
+                if not current_event.is_trade_feedback:
+                    break
+        print("LL:", self.agent.get_LL())
+
+    def get_last_interval(self):
+        return self.T - self.agent.curr_time
+
+    def reward_fn(self):
+        reward = MAX_AMT
+        owned_shares = 0
+        print("calculating reward...")
+        for idx in range(len(self.list_t_delta)):
+            if self.list_alpha_i[idx] == 0:
+                reward -= self.list_n_i[idx] * self.list_v_curr[idx]
+                owned_shares += self.list_n_i[idx]
+            elif self.list_alpha_i[idx] == 1:
+                reward += self.list_n_i[idx] * self.list_v_curr[idx]
+                owned_shares -= self.list_n_i[idx]
+            reward -= BASE_CHARGES
+            reward -= (self.list_n_i[idx] * self.list_v_curr[idx] * PERCENTAGE_CHARGES)
+        reward += owned_shares * self.v_last
+        return reward
+
+    def get_num_events(self):
+        return len(self.list_t_delta)
 
 
 def mk_def_trader_opts(seed):
@@ -400,7 +433,6 @@ def mk_def_trader_opts(seed):
 
 
 class ExpRecurrentTrader:
-
     def __init__(self, wt, W_t, Wb_alpha, Ws_alpha, Wn_b, Wn_s,
                  W_h, W_1, W_2, W_3, b_t, b_alpha, bn_b, bn_s, b_h,
                  Vt_h, Vt_v, b_lambda, Vh_alpha, Vv_alpha, Va_b, Va_s,
@@ -513,6 +545,19 @@ class ExpRecurrentTrader:
                     self.tf_batch_n_i = tf.placeholder(name='n_i',
                                                          shape=(self.tf_batch_size, 1),
                                                          dtype=tf.int32)
+                    self.tf_batch_v_curr = tf.placeholder(name='v_curr',
+                                                       shape=(self.tf_batch_size, 1),
+                                                       dtype=tf.int32)
+                    self.tf_batch_is_trade_feedback = tf.placeholder(name='is_trade_feedback',
+                                                       shape=(self.tf_batch_size, 1),
+                                                       dtype=tf.int32)
+                    self.tf_batch_current_amt = tf.placeholder(name='current_amt',
+                                                       shape=(self.tf_batch_size, 1),
+                                                       dtype=tf.int32)
+                    self.tf_batch_portfolio = tf.placeholder(name='portfolio',
+                                                       shape=(self.tf_batch_size, 1),
+                                                       dtype=tf.int32)
+
                     # Inferred batch size
                     inf_batch_size = tf.shape(self.tf_batch_t_deltas)[0]
 
@@ -555,10 +600,9 @@ class ExpRecurrentTrader:
                                 )
                             ]
 
-                            # TODO: [1]*4?? ouptut_size??
                             self.rnn_cell_stack = TPPRExpMarkedCellStacked_finance(
                                 hidden_state_size=(None, self.num_hidden_states),
-                                output_size=[1] * 5 + [self.num_hidden_states] + [1],
+                                output_size=[self.num_hidden_states] + [1] * 5,
                                 tf_dtype=self.tf_dtype,
                                 W_t=self.W_t_mini, Wb_alpha=self.Wb_alpha_mini,
                                 Ws_alpha=self.Ws_alpha_mini, Wn_b=self.Wn_b_mini,
@@ -575,9 +619,13 @@ class ExpRecurrentTrader:
                             ((self.h_states_stack, LL_log_terms_stack, LL_int_terms_stack, loss_terms_stack),
                              tf_batch_h_t_mini) = tf.nn.dynamic_rnn(
                                 self.rnn_cell_stack,
-                                inputs=(tf.expand_dims(self.tf_batch_alpha_i, axis=-1),
+                                inputs=(tf.expand_dims(self.tf_batch_t_deltas, axis=-1),
+                                        tf.expand_dims(self.tf_batch_alpha_i, axis=-1),
                                         tf.expand_dims(self.tf_batch_n_i, axis=-1),
-                                        tf.expand_dims(self.tf_batch_t_deltas, axis=-1)),
+                                        tf.expand_dims(self.tf_batch_v_curr, axis=-1),
+                                        tf.expand_dims(self.tf_batch_is_trade_feedback, axis=-1),
+                                        tf.expand_dims(self.tf_batch_current_amt, axis=-1),
+                                        tf.expand_dims(self.tf_batch_portfolio, axis=-1)),
                                 sequence_length=tf.squeeze(self.tf_batch_seq_len, axis=-1),
                                 dtype=self.tf_dtype,
                                 initial_state=self.tf_batch_init_h
@@ -865,28 +913,35 @@ def read_raw_data():
     return df
 
 
-def get_feed_dict(trader, scenarios):
+def get_feed_dict(trader, mgr):
     """Produce a feed_dict for the given list of scenarios."""
-    batch_size = len(scenarios)
-    full_shape = (batch_size, 1)
-    batch_rewards = np.asarray([s.reward() for s in scenarios])[:, np.newaxis]
-    batch_last_interval = np.asarray([
-        s.get_last_interval() for s in scenarios
-    ], dtype=float)
+    batch_size = 1
+    # TODO get maximum events = TradeFB + ReadFB events.
+    max_events = len(mgr.list_t_delta)
+    # TODO modify when multiple portfolios are considered
+    types_of_portfolio = 1
 
-    batch_seq_len = np.asarray([
-        s.get_num_events() for s in scenarios
-    ], dtype=float)[:, np.newaxis]
+    full_shape = (batch_size, max_events)
+    portfolio_shape = (batch_size, types_of_portfolio, max_events)
+    batch_rewards = np.asarray([mgr.reward_fn()])[:, np.newaxis]
+
+    batch_last_interval = np.asarray([mgr.get_last_interval()], dtype=float)
+
+    batch_seq_len = np.asarray([mgr.get_num_events()], dtype=float)[:, np.newaxis]
 
     batch_t_deltas = np.zeros(shape=full_shape, dtype=float)
     batch_alpha_i = np.zeros(shape=full_shape, dtype=int)
     batch_n_i = np.zeros(shape=full_shape, dtype=float)
     batch_init_h = np.zeros(shape=(batch_size, trader.num_hidden_states), dtype=float)
+    batch_current_amount = np.zeros(shape=full_shape, dtype=float)  # TODO
+    batch_current_portfolio = np.zeros(shape=portfolio_shape, dtype=float)  # TODO: with shape portfolio_shape
+    batch_event_type = np.zeros(shape=full_shape, dtype=float)
 
     for idx, scen in enumerate(scenarios):
         # They are sorted by time already.
+        # TODO fill in current_amount, current_portfolio, event_type
         batch_len = int(batch_seq_len[idx])
-        batch_alpha_i[idx, 0:batch_len] = scen.alpha_i
+        batch_alpha_i[idx, 0:batch_len] = scen.alpha_i   # TODO in Environment
         batch_t_deltas[idx, 0:batch_len] = scen.time_deltas
         batch_n_i[idx, 0:batch_len] = scen.n_i
 
@@ -897,7 +952,12 @@ def get_feed_dict(trader, scenarios):
         trader.tf_batch_seq_len: batch_seq_len,
         trader.tf_batch_t_deltas: batch_t_deltas,
         trader.tf_batch_init_h: batch_init_h,
-        trader.tf_batch_last_interval: batch_last_interval
+        trader.tf_batch_last_interval: batch_last_interval,
+
+        # TODO: To implement
+        trader.tf_batch_current_portfolio: batch_current_portfolio,
+        trader.tf_batch_current_amount: batch_current_amount,
+        trader.tf_batch_event_type: batch_event_type
     }
 
 
@@ -933,7 +993,7 @@ def run_scenario(trader, seed):
     # start time is set to '2009-09-28 09:30:00' i.e. 9:30 am of 28sept2009: 1254130200
     # max time T is set to '2009-09-28 16:00:00' i.e. same day 4pm: 1254153600
     mgr = Environment(T=1254133800, time_gap="second", raw_data=raw_data, agent=agent, start_time=1254130200, seed=seed)
-    # v_last = mgr.simulator()
+    mgr.simulator()
     return mgr
 
 

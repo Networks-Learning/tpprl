@@ -10,19 +10,19 @@ from .cell_finance import TPPRExpMarkedCellStacked_finance as ExpTrader
 from .util_finance import _now
 
 
-def cmd(output_dir, should_restore, T, tau, with_summaries,
+def cmd(output_dir, should_restore, T, with_summaries,
         summary_suffix, only_cpu, q, epochs,
         num_iters, save_every, until):
     """Read initial difficulty of items from INITIAL_DIFFICULTY_CSV, ALPHA and
     BETA, train an optimal teacher and save the results to output_dir."""
 
-    summary_dir = os.path.join(output_dir, 'summary/train-{}'.format(summary_suffix))
-    save_dir = os.path.join(output_dir, 'save/')
+    summary_dir = os.path.join(output_dir, '/output_event_{}_0_day.csv"'.format(summary_suffix))
+    save_dir = os.path.join(output_dir, '/save/')
 
     os.makedirs(summary_dir, exist_ok=True)
     os.makedirs(save_dir, exist_ok=True)
 
-    teacher_opts = ExpTrader.mk_def_teacher_opts(
+    teacher_opts = ExpTrader.mk_def_(
         hidden_dims=8,
         learning_rate=0.02,
         decay_rate=0.02,
@@ -31,10 +31,7 @@ def cmd(output_dir, should_restore, T, tau, with_summaries,
         batch_size=32,
         only_cpu=only_cpu,
         T=T,
-        tau=tau,
-        q=q,
-        learning_bump=1.0,
-        decay_steps=10,
+        q=q
     )
 
     config = tf.ConfigProto(
@@ -75,10 +72,8 @@ def cmd(output_dir, should_restore, T, tau, with_summaries,
             num_iters=num_iters,
             init_seed=42,
             with_summaries=with_summaries,
-            with_MP=with_MP,
             with_memorize_loss=False,
             save_every=save_every,
-            with_recall_probs=with_recall_probs,
         )
 
         step = teacher.sess.run(teacher.global_step)
@@ -92,4 +87,7 @@ def cmd(output_dir, should_restore, T, tau, with_summaries,
 
 
 if __name__ == '__main__':
-    cmd()
+    cmd(output_dir="/NL/tpprl-result/work/rl-finance/results_TF_RL_strategy/", should_restore=True, T=1254133800)
+"""output_dir, should_restore, T, tau, with_summaries,
+        summary_suffix, only_cpu, q, epochs,
+        num_iters, save_every, until"""
