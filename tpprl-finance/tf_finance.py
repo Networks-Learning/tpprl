@@ -4,10 +4,11 @@ import pandas as pd
 import numpy as np
 import os
 
-from .util_finance import _now, variable_summaries
-from .cell_finance import TPPRExpMarkedCellStacked_finance
+from util_finance import _now, variable_summaries
+from cell_finance import TPPRExpMarkedCellStacked_finance
 
-SAVE_DIR = "/NL/tpprl-result/work/rl-finance/"
+# SAVE_DIR = "/NL/tpprl-result/work/rl-finance/"
+SAVE_DIR = "/home/supriya/MY_HOME/MPI-SWS/dataset"
 HIDDEN_LAYER_DIM = 8
 MAX_AMT = 1000.0
 MAX_SHARE = 100
@@ -33,22 +34,22 @@ class Feedback:
         self.portfolio = portfolio
 
     def is_trade_event(self):
-        return self.is_trade_feedback
+        return self.is_trade_feedback==1
 
     def is_tick_event(self):
-        return not self.is_trade_feedback
+        return self.is_trade_feedback==2
 
 
 class TradeFeedback(Feedback):
     def __init__(self, t_i, v_curr, alpha_i, n_i, event_curr_amt, portfolio):
-        super(TradeFeedback, self).__init__(t_i, v_curr, is_trade_feedback=True, event_curr_amt=event_curr_amt, portfolio=portfolio)
+        super(TradeFeedback, self).__init__(t_i, v_curr, is_trade_feedback=1, event_curr_amt=event_curr_amt, portfolio=portfolio)
         self.alpha_i = alpha_i
         self.n_i = n_i
 
 
 class TickFeedback(Feedback):
     def __init__(self, t_i, v_curr, event_curr_amt, portfolio):
-        super(TickFeedback, self).__init__(t_i, v_curr, is_trade_feedback=False, event_curr_amt=event_curr_amt, portfolio=portfolio)
+        super(TickFeedback, self).__init__(t_i, v_curr, is_trade_feedback=2, event_curr_amt=event_curr_amt, portfolio=portfolio)
         self.alpha_i = 0
         self.n_i = 0
 
@@ -379,9 +380,9 @@ class Environment:
         return len(self.list_t_delta)
 
 
-def mk_def_trader_opts(seed):
+def make_default_trader_opts(seed):
     """Make default option set."""
-    t_min = 1254130200
+    start_time = 1254130200
     scope = None
     decay_steps = 100
     decay_rate = 0.001
@@ -389,56 +390,57 @@ def mk_def_trader_opts(seed):
     learning_rate = 0.01
     clip_norm = 1.0
     RS = np.random.RandomState(seed)
-    wt = np.abs(RS.rand(1, 1)) * -1
-    W_t = RS.randn(HIDDEN_LAYER_DIM, 1)
-    Wb_alpha = RS.randn(HIDDEN_LAYER_DIM, 1)
-    Ws_alpha = RS.randn(HIDDEN_LAYER_DIM, 1)
-    Wn_b = RS.randn(HIDDEN_LAYER_DIM, 1)
-    Wn_s = RS.randn(HIDDEN_LAYER_DIM, 1)
-    W_h = RS.randn(HIDDEN_LAYER_DIM, HIDDEN_LAYER_DIM) * 0.1 + np.diag(
-        np.ones(HIDDEN_LAYER_DIM))  # Careful initialization
-    W_1 = RS.randn(HIDDEN_LAYER_DIM, HIDDEN_LAYER_DIM)
-    W_2 = RS.randn(HIDDEN_LAYER_DIM, HIDDEN_LAYER_DIM)
-    W_3 = RS.randn(HIDDEN_LAYER_DIM, HIDDEN_LAYER_DIM)
-    b_t = RS.randn(HIDDEN_LAYER_DIM, 1)
-    b_alpha = RS.randn(HIDDEN_LAYER_DIM, 1)
-    bn_b = RS.randn(HIDDEN_LAYER_DIM, 1)
-    bn_s = RS.randn(HIDDEN_LAYER_DIM, 1)
-    b_h = RS.randn(HIDDEN_LAYER_DIM, 1)
-    Vt_h = RS.randn(1, HIDDEN_LAYER_DIM)
+    wt = RS.randn(1, 1)
+    W_t = RS.randn(num_hidden_states, 1)
+    Wb_alpha = RS.randn(num_hidden_states, 1)
+    Ws_alpha = RS.randn(num_hidden_states, 1)
+    Wn_b = RS.randn(num_hidden_states, 1)
+    Wn_s = RS.randn(num_hidden_states, 1)
+    W_h = np.array([RS.randn(num_hidden_states, num_hidden_states) * 0.1 + np.diag(np.ones(num_hidden_states))])  # Careful initialization
+    W_1 = RS.randn(num_hidden_states, num_hidden_states)
+    W_2 = RS.randn(num_hidden_states, num_hidden_states)
+    W_3 = RS.randn(num_hidden_states, num_hidden_states)
+    b_t = RS.randn(num_hidden_states, 1)
+    b_alpha = RS.randn(num_hidden_states, 1)
+    bn_b = RS.randn(num_hidden_states, 1)
+    bn_s = RS.randn(num_hidden_states, 1)
+    b_h = RS.randn(num_hidden_states, 1)
+    Vt_h = RS.randn(1, num_hidden_states)
     Vt_v = RS.randn(1, 1)
     b_lambda = RS.randn(1, 1)
-    Vh_alpha = RS.randn(2, HIDDEN_LAYER_DIM)
+    Vh_alpha = RS.randn(2, num_hidden_states)
     Vv_alpha = RS.randn(2, 1)
-    Va_b = RS.randn(MAX_SHARE, HIDDEN_LAYER_DIM)
-    Va_s = RS.randn(MAX_SHARE, HIDDEN_LAYER_DIM)
+    Va_b = RS.randn(MAX_SHARE, num_hidden_states)
+    Va_s = RS.randn(MAX_SHARE, num_hidden_states)
 
     # The graph execution time depends on this parameter even though each
     # trajectory may contain much fewer events. So it is wise to set
     # it such that it is just above the total number of events likely
     # to be seen.
     momentum = 0.9
-    max_events = 5000
-    batch_size = 16
+    max_events = 1
+    batch_size = 1
     T = 1254133800
 
     device_cpu = '/cpu:0'
     device_gpu = '/gpu:0'
     only_cpu = False
-    save_dir = SAVE_DIR
+    save_dir = SAVE_DIR+"/output_3Apr/"
     # Expected: './tpprl.summary/train-{}/'.format(run)
-    summary_dir = None
-    q = 0.0005
-    set_wt_zero = False
+    summary_dir = save_dir+"/summary_dir/"
+    return wt, W_t, Wb_alpha, Ws_alpha, Wn_b, Wn_s, W_h, W_1, W_2, W_3, b_t, b_alpha, bn_b, bn_s,b_h, Vt_h, \
+           Vt_v, b_lambda, Vh_alpha, Vv_alpha, Va_b, Va_s, num_hidden_states, scope, batch_size, learning_rate, \
+           clip_norm, summary_dir, save_dir, decay_steps, decay_rate, momentum, device_cpu, device_gpu, only_cpu,\
+           max_events, T, start_time
 
 
 class ExpRecurrentTrader:
     def __init__(self, wt, W_t, Wb_alpha, Ws_alpha, Wn_b, Wn_s,
                  W_h, W_1, W_2, W_3, b_t, b_alpha, bn_b, bn_s, b_h,
                  Vt_h, Vt_v, b_lambda, Vh_alpha, Vv_alpha, Va_b, Va_s,
-                 num_hidden_states, sess, scope, batch_size, q, learning_rate, clip_norm,
+                 num_hidden_states, sess, scope, batch_size, learning_rate, clip_norm,
                  summary_dir, save_dir, decay_steps, decay_rate, momentum,
-                 device_cpu, device_gpu, only_cpu):
+                 device_cpu, device_gpu, only_cpu, max_events):
         self.summary_dir = summary_dir
         self.save_dir = save_dir
         self.tf_dtype = tf.float32
@@ -449,13 +451,13 @@ class ExpRecurrentTrader:
         self.decay_steps = decay_steps
         self.clip_norm = clip_norm
 
-        self.q = q
         self.batch_size = batch_size
 
         self.tf_batch_size = None
 
-        # self.tf_max_events = T
+        self.tf_max_events = None
         self.num_hidden_states = num_hidden_states
+        self.types_of_portfolio = 1
 
         self.scope = scope or type(self).__name__
         var_device = device_cpu if only_cpu else device_gpu
@@ -531,32 +533,32 @@ class ExpRecurrentTrader:
                                                            shape=(self.tf_batch_size, 1),
                                                            dtype=self.tf_dtype)
                     self.tf_batch_t_deltas = tf.placeholder(name='t_deltas',
-                                                            shape=(self.tf_batch_size, 1),
+                                                            shape=(self.tf_batch_size, self.tf_max_events),
                                                             dtype=self.tf_dtype)
                     self.tf_batch_seq_len = tf.placeholder(name='seq_len',
                                                            shape=(self.tf_batch_size, 1),
-                                                           dtype=tf.int32)
+                                                           dtype=self.tf_dtype)
                     self.tf_batch_last_interval = tf.placeholder(name='last_interval',
                                                                  shape=self.tf_batch_size,
                                                                  dtype=self.tf_dtype)
                     self.tf_batch_alpha_i = tf.placeholder(name='alpha_i',
-                                                           shape=(self.tf_batch_size, 1),
+                                                           shape=(self.tf_batch_size, self.tf_max_events),
                                                            dtype=tf.int32)
                     self.tf_batch_n_i = tf.placeholder(name='n_i',
-                                                         shape=(self.tf_batch_size, 1),
+                                                         shape=(self.tf_batch_size, self.tf_max_events),
                                                          dtype=tf.int32)
                     self.tf_batch_v_curr = tf.placeholder(name='v_curr',
-                                                       shape=(self.tf_batch_size, 1),
-                                                       dtype=tf.int32)
+                                                       shape=(self.tf_batch_size, self.tf_max_events),
+                                                       dtype=self.tf_dtype)
                     self.tf_batch_is_trade_feedback = tf.placeholder(name='is_trade_feedback',
-                                                       shape=(self.tf_batch_size, 1),
-                                                       dtype=tf.int32)
+                                                       shape=(self.tf_batch_size, self.tf_max_events),
+                                                       dtype=self.tf_dtype)
                     self.tf_batch_current_amt = tf.placeholder(name='current_amt',
-                                                       shape=(self.tf_batch_size, 1),
-                                                       dtype=tf.int32)
+                                                       shape=(self.tf_batch_size, self.tf_max_events, self.types_of_portfolio),
+                                                       dtype=self.tf_dtype)
                     self.tf_batch_portfolio = tf.placeholder(name='portfolio',
-                                                       shape=(self.tf_batch_size, 1),
-                                                       dtype=tf.int32)
+                                                       shape=(self.tf_batch_size, self.tf_max_events, self.types_of_portfolio),
+                                                       dtype=self.tf_dtype)
 
                     # Inferred batch size
                     inf_batch_size = tf.shape(self.tf_batch_t_deltas)[0]
@@ -908,7 +910,7 @@ def read_raw_data():
     # folder = "/home/supriya/MY_HOME/MPI-SWS/dataset"
     # folder = "/NL/tpprl-result/work/rl-finance/"
     # raw = pd.read_csv(folder + "/hourly_data/0_hour.csv")  # header names=['datetime', 'price'])
-    raw = pd.read_csv(SAVE_DIR + "/daily_data/0_day.csv")
+    raw = pd.read_csv(SAVE_DIR + "/0_day.csv")
     df = pd.DataFrame(raw)
     return df
 
@@ -918,7 +920,7 @@ def get_feed_dict(trader, mgr):
     batch_size = 1
     # TODO get maximum events = TradeFB + ReadFB events.
     max_events = len(mgr.list_t_delta)
-    # TODO modify when multiple portfolios are considered
+    # TODO modify following when multiple portfolios are considered
     types_of_portfolio = 1
 
     full_shape = (batch_size, max_events)
@@ -929,39 +931,50 @@ def get_feed_dict(trader, mgr):
 
     batch_seq_len = np.asarray([mgr.get_num_events()], dtype=float)[:, np.newaxis]
 
-    batch_t_deltas = np.zeros(shape=full_shape, dtype=float)
+    batch_t_delta = np.zeros(shape=full_shape, dtype=float)
     batch_alpha_i = np.zeros(shape=full_shape, dtype=int)
     batch_n_i = np.zeros(shape=full_shape, dtype=float)
+    batch_v_curr = np.zeros(shape=full_shape, dtype=float)
+    batch_is_trade_feedback = np.zeros(shape=full_shape, dtype=int)  # TODO: array of booleans
+    batch_current_amount = np.zeros(shape=portfolio_shape, dtype=float)
+    batch_portfolio = np.zeros(shape=portfolio_shape, dtype=float)  # TODO: with shape portfolio_shape
     batch_init_h = np.zeros(shape=(batch_size, trader.num_hidden_states), dtype=float)
-    batch_current_amount = np.zeros(shape=full_shape, dtype=float)  # TODO
-    batch_current_portfolio = np.zeros(shape=portfolio_shape, dtype=float)  # TODO: with shape portfolio_shape
-    batch_event_type = np.zeros(shape=full_shape, dtype=float)
 
-    for idx, scen in enumerate(scenarios):
-        # They are sorted by time already.
-        # TODO fill in current_amount, current_portfolio, event_type
-        batch_len = int(batch_seq_len[idx])
-        batch_alpha_i[idx, 0:batch_len] = scen.alpha_i   # TODO in Environment
-        batch_t_deltas[idx, 0:batch_len] = scen.time_deltas
-        batch_n_i[idx, 0:batch_len] = scen.n_i
+    batch_len = int(batch_seq_len)
+
+    batch_t_delta[0:batch_len] = mgr.list_t_delta
+    batch_alpha_i[0:batch_len] = mgr.list_alpha_i
+    batch_n_i[0:batch_len] = mgr.list_n_i
+    batch_v_curr[0:batch_len] = mgr.list_v_curr
+    batch_is_trade_feedback[0:batch_len] = mgr.list_is_trade_feedback
+    batch_current_amount[0:batch_len] = mgr.list_current_amount
+    batch_portfolio[0:batch_len] = mgr.list_portfolio
+
+    # for idx, scen in enumerate(mgr):
+    #     # They are sorted by time already.
+    #     # TODO fill in current_amount, current_portfolio, event_type
+    #     batch_len = int(batch_seq_len[idx])
+    #     batch_alpha_i[idx, 0:batch_len] = scen.alpha_i   # TODO in Environment
+    #     batch_t_deltas[idx, 0:batch_len] = scen.time_deltas
+    #     batch_n_i[idx, 0:batch_len] = scen.n_i
 
     return {
+        trader.tf_batch_t_deltas: batch_t_delta,
         trader.tf_batch_alpha_i: batch_alpha_i,
         trader.tf_batch_n_i: batch_n_i,
+        trader.tf_batch_v_curr: batch_v_curr,
+        trader.tf_batch_is_trade_feedback: batch_is_trade_feedback,
+        trader.tf_batch_current_amt: batch_current_amount,
+        trader.tf_batch_portfolio: batch_portfolio,
+
         trader.tf_batch_rewards: batch_rewards,
         trader.tf_batch_seq_len: batch_seq_len,
-        trader.tf_batch_t_deltas: batch_t_deltas,
         trader.tf_batch_init_h: batch_init_h,
         trader.tf_batch_last_interval: batch_last_interval,
-
-        # TODO: To implement
-        trader.tf_batch_current_portfolio: batch_current_portfolio,
-        trader.tf_batch_current_amount: batch_current_amount,
-        trader.tf_batch_event_type: batch_event_type
     }
 
 
-def run_scenario(trader, seed):
+def run_scenario(trader, seed, T, start_time):
     raw_data = read_raw_data()
     wt = trader.sess.run(trader.tf_wt)
     W_t = trader.sess.run(trader.tf_W_t)
@@ -992,8 +1005,39 @@ def run_scenario(trader, seed):
                        Vt_v, b_lambda, Vh_alpha, Vv_alpha, Va_b, Va_s, seed)
     # start time is set to '2009-09-28 09:30:00' i.e. 9:30 am of 28sept2009: 1254130200
     # max time T is set to '2009-09-28 16:00:00' i.e. same day 4pm: 1254153600
-    mgr = Environment(T=1254133800, time_gap="second", raw_data=raw_data, agent=agent, start_time=1254130200, seed=seed)
+    mgr = Environment(T=T, time_gap="second", raw_data=raw_data, agent=agent, start_time=start_time, seed=seed)
     mgr.simulator()
     return mgr
 
 
+def test_run_scenario():
+    seed = 42
+    # TODO create trader object
+    wt, W_t, Wb_alpha, Ws_alpha, Wn_b, Wn_s, W_h, W_1, W_2, W_3, b_t, b_alpha, bn_b, bn_s, b_h, Vt_h, \
+    Vt_v, b_lambda, Vh_alpha, Vv_alpha, Va_b, Va_s, num_hidden_states, scope, batch_size, learning_rate, \
+    clip_norm, summary_dir, save_dir, decay_steps, decay_rate, momentum, device_cpu, device_gpu, only_cpu, \
+    max_events, T, start_time = make_default_trader_opts(seed=seed)
+
+    print("default trader initialized..")
+
+    sess = tf.Session()
+    print("session created")
+
+    trader = ExpRecurrentTrader(wt=wt, W_t=W_t, Wb_alpha=Wb_alpha, Ws_alpha=Ws_alpha, Wn_b=Wn_b, Wn_s=Wn_s, W_h=W_h,
+                                W_1=W_1, W_2=W_2, W_3=W_3, b_t=b_t, b_alpha=b_alpha, bn_b=bn_b, bn_s=bn_s,
+                                b_h=b_h, Vt_h=Vt_h, Vt_v=Vt_v, b_lambda=b_lambda, Vh_alpha=Vh_alpha, Vv_alpha=Vv_alpha,
+                                Va_b=Va_b, Va_s=Va_s, num_hidden_states=num_hidden_states, sess=sess, scope=scope,
+                                batch_size=batch_size, learning_rate=learning_rate, clip_norm=clip_norm, summary_dir=summary_dir,
+                                save_dir=save_dir, decay_steps=decay_steps, decay_rate=decay_rate, momentum=momentum,
+                                device_cpu=device_cpu, device_gpu=device_gpu, only_cpu=only_cpu, max_events=max_events)
+    print("trader created")
+
+    # TODO call run_scenario
+    mgr = run_scenario(trader=trader, seed=seed, T=T, start_time=start_time)
+    print("manager/environment created")
+
+    # TODO call get_feed_dict
+    feed_dict = get_feed_dict(trader=trader, mgr=mgr)
+
+if __name__ == '__main__':
+    test_run_scenario()

@@ -22,6 +22,7 @@ def cmd(output_dir, should_restore, T, with_summaries,
     os.makedirs(summary_dir, exist_ok=True)
     os.makedirs(save_dir, exist_ok=True)
 
+     # TODO: update the parameters
     teacher_opts = ExpTrader.mk_def_(
         hidden_dims=8,
         learning_rate=0.02,
