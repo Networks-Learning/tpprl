@@ -1,4 +1,5 @@
 import tensorflow as tf
+
 # import numpy as np
 
 MAX_AMT = 1000.0
@@ -58,64 +59,113 @@ class TPPRExpMarkedCellStacked_finance(tf.contrib.rnn.RNNCell):
         t_delta, alpha_i, n_i, v_curr, is_trade_feedback, current_amt, portfolio = inp
         inf_batch_size = tf.shape(t_delta)[0]
 
-        if is_trade_feedback==1:
-            tau_i = tf.math.add(x=tf.einsum('aij,aj->ai', self.tf_W_t, t_delta, name='einsum_tau_i'), y=self.tf_b_t, name="tau_i")
-            b_i = tf.math.add(tf.math.add(tf.einsum('aij,aj->ai', self.tf_Wb_alpha, (1-alpha_i)),
-                                          tf.einsum('sij,aj->ai', self.tf_Ws_alpha, alpha_i), name="einsum_b_i"),
-                              self.tf_b_alpha, name="b_i")
-            if alpha_i == 0:
-                eta_i = tf.math.add(tf.einsum('aij,aj->ai', self.tf_Wn_b, n_i, name="einsum_n_i"), self.tf_bn_b, name='n_i_buy')
-            else:
-                eta_i = tf.math.add(tf.einsum('aij,aj->ai', self.tf_Wn_s, n_i, name="einsum_n_i"), self.tf_bn_s, name='n_i_sell')
+        def calculate_h_next():
+            tau_i = tf.math.add(x=tf.einsum('aij,aj->ai', self.tf_W_t, t_delta, name='einsum_tau_i'),
+                                y=tf.squeeze(self.tf_b_t, axis=-1),
+                                name="tau_i")
+            b_i = tf.math.add(
+                tf.math.add(tf.einsum('aij,aj->ai', self.tf_Wb_alpha, tf.cast((1 - alpha_i), dtype=tf.float32)),
+                            tf.einsum('aij,aj->ai', self.tf_Ws_alpha, tf.cast(alpha_i, dtype=tf.float32)),
+                            name="einsum_b_i"),
+                tf.squeeze(self.tf_b_alpha, axis=-1), name="b_i")
 
-            h_next = tf.nn.tanh(
-                tf.einsum('aij,aj->ai', self.tf_Wh, h_prev) +
-                tf.einsum('aij,aj->ai', self.tf_W_1, tau_i) +
-                tf.einsum('aij,aj->ai', self.tf_W_2, b_i) +
-                tf.einsum('aij,aj->ai',self.tf_W_3, eta_i) +
+            def encode_buy_n_i():
+                buy_n_i = tf.math.add(
+                    tf.einsum('aij,aj->ai', self.tf_Wn_b, tf.cast(n_i, dtype=tf.float32), name="einsum_n_i_buy"),
+                    tf.squeeze(self.tf_bn_b, axis=-1),
+                    name='n_i_buy')
+                return buy_n_i
+
+            def encode_sell_n_i():
+                sell_n_i = tf.math.add(
+                    tf.einsum('aij,aj->ai', self.tf_Wn_s, tf.cast(n_i, dtype=tf.float32), name="einsum_n_i_sell"),
+                    tf.squeeze(self.tf_bn_s, axis=-1),
+                    name='n_i_sell')
+                return sell_n_i
+
+            val_alpha_i = tf.squeeze(tf.gather(alpha_i, 0, axis=-1), axis=-1)
+            eta_i = tf.cond(
+                pred=tf.equal(val_alpha_i, 0),
+                true_fn=encode_buy_n_i,
+                false_fn=encode_sell_n_i,
+                name="encode_n_i_eta_i"
+            )
+            hnext = tf.nn.tanh(
+                tf.einsum('aij,ai->aj', self.tf_W_h, h_prev) +
+                tf.einsum('aij,ai->aj', self.tf_W_1, tau_i) +
+                tf.einsum('aij,ai->aj', self.tf_W_2, b_i) +
+                tf.einsum('aij,ai->aj', self.tf_W_3, eta_i) +
                 tf.squeeze(self.tf_b_h, axis=-1),
                 name='h_next'
             )
-        else:
-            h_next = h_prev
-        # TODO: LL calculation for alpha_i and n_i
+            return hnext
 
+        # TODO: LL calculation for alpha_i and n_i
+        val_is_trade_feedback = tf.squeeze(tf.gather(is_trade_feedback, 0, axis=-1), axis=-1)
+        h_next = tf.cond(
+            tf.equal(val_is_trade_feedback, 1),
+            true_fn=calculate_h_next,
+            false_fn=lambda: h_prev,
+            name="is_h_next_updated"
+        )
         u_theta = self.u_theta(h_prev, t_delta, name='u_theta')
         t_0 = tf.zeros(name='zero_time', shape=(inf_batch_size, 1), dtype=self.tf_dtype)
         u_theta_0 = self.u_theta(h_prev, t_0, name='u_theta_0')
 
-        # calculte LL for alpha with sigmoid
-        prob_alpha_i = tf.nn.sigmoid(tf.math.add(tf.einsum('aij,ai->aj', self.tf_Vh_alpha, h_prev, name="einsum_alphai_hi"),
-                                                 tf.einsum('aij,ai->aj', self.tf_Vv_alpha, t_delta, name="einsum_alphai_tdelta"),
-                                                 name="add_prob_alphai"),
-                                     name="prob_alpha_i")
+        # calculate LL for alpha with sigmoid
+        prob_alpha_i = tf.nn.sigmoid(
+            tf.math.add(tf.einsum('aij,ai->aj', self.tf_Vh_alpha, h_prev, name="einsum_alphai_hi"),
+                        tf.einsum('aij,ai->aj', self.tf_Vv_alpha, t_delta, name="einsum_alphai_tdelta"),
+                        name="add_prob_alphai"),
+            name="prob_alpha_i")
         # LL of alpha_i
         LL_alpha_i = tf.squeeze(tf.log(tf.gather(prob_alpha_i, alpha_i, axis=-1)), axis=-1)
 
         # calculate LL for n_i
-        # TODO: apply mask??
-        # calculate mask
-        if alpha_i == 0:
+        # TODO: apply mask
+        def prob_n_buy():
             A = tf.einsum('aij,ai->aj', self.tf_Va_b, h_prev, name='A_buy')
+            # TODO: v_curr=(?, portfolio,1)
+            max_share_buy = tf.math.minimum(MAX_SHARE, tf.cast(
+                tf.math.floor(
+                    tf.squeeze(current_amt) / (v_curr + (tf.scalar_mul(scalar=PERCENTAGE_CHARGES, x=v_curr)))),
+                dtype=tf.int32)) + 1  # to allow buying zero shares
+            mask = tf.cast(tf.expand_dims(
+                tf.concat(tf.ones(max_share_buy, dtype=tf.int32),
+                          tf.zeros(MAX_SHARE + 1 - max_share_buy, dtype=tf.int32)), axis=-1), dtype=tf.float32)
+            exp_A = tf.exp(A)
+            masked_A = tf.multiply(mask, exp_A)
+            prob_n = masked_A / tf.reduce_sum(masked_A, axis=-1)
+            prob_n = tf.squeeze(prob_n)
+            return prob_n
 
-            max_share_buy = tf.math.minimum(MAX_SHARE, tf.cast(tf.math.floor(current_amt / (v_curr + (tf.scalar_mul(scalar=PERCENTAGE_CHARGES, x=v_curr)))),dtype=tf.int32)) + 1  # to allow buying zero shares
-            mask = tf.expand_dims(tf.concat(tf.ones(max_share_buy),
-                                            tf.zeros(MAX_SHARE + 1 - max_share_buy)), axis=-1)  # total size is 101
-            exp_A = tf.exp(A)
-            masked_A = tf.multiply(mask, exp_A)
-            prob_n = masked_A / tf.reduce_sum(masked_A, axis=-1)
-            prob_n = tf.squeeze(prob_n)
-        else:
+        def prob_n_sell():
             A = tf.einsum('aij,ai->aj', self.tf_Va_s, h_prev, name='A_sell')
-            num_share_sell = tf.cast(tf.multiply(portfolio, v_curr) / (v_curr + tf.scalar_mul(scalar=PERCENTAGE_CHARGES, x=v_curr)),dtype=tf.int32)
+            num_share_sell = tf.cast(
+                tf.multiply(portfolio, v_curr) / (v_curr + tf.scalar_mul(scalar=PERCENTAGE_CHARGES, x=v_curr)),
+                dtype=tf.int32)
             max_share_sell = tf.squeeze(tf.math.minimum(MAX_SHARE, num_share_sell)) + 1  # to allow buying zero shares
-            mask = tf.expand_dims(tf.concat([tf.ones(max_share_sell), tf.zeros(MAX_SHARE + 1 - max_share_sell)], axis=-1), axis=1)
+            mask = tf.cast(tf.expand_dims(
+                tf.concat([tf.ones(max_share_sell, dtype=tf.int32),
+                           tf.zeros(MAX_SHARE + 1 - max_share_sell, dtype=tf.int32)], axis=-1), axis=1),
+                dtype=tf.float32)
             exp_A = tf.exp(A)
             masked_A = tf.multiply(mask, exp_A)
             prob_n = masked_A / tf.reduce_sum(masked_A, axis=-1)
             prob_n = tf.squeeze(prob_n)
+            return prob_n
+
+        # calculate mask as per the value of alpha_i=0=buy and 1=sell
+        val_alpha_i = tf.squeeze(tf.gather(alpha_i, 0, axis=-1), axis=-1)
+        prob_n = tf.cond(
+            pred=tf.equal(val_alpha_i, 0),
+            true_fn=prob_n_buy,
+            false_fn=prob_n_sell,
+            name="encode_n_i_eta_i"
+        )
+
         # LL of n_i
-        LL_n_i = tf.squeeze(tf.log(tf.gather(prob_n, n_i,axis=-1)), axis=-1)
+        LL_n_i = tf.squeeze(tf.log(tf.gather(prob_n, n_i, axis=-1)), axis=-1)
 
         # LL of t_i and delta calculation
         LL_log = tf.squeeze(tf.log(u_theta), axis=-1)

@@ -1,14 +1,14 @@
 import sys
-import tensorflow as tf
 import pandas as pd
 import numpy as np
 import os
+import tensorflow as tf
 
 from util_finance import _now, variable_summaries
 from cell_finance import TPPRExpMarkedCellStacked_finance
 
-# SAVE_DIR = "/NL/tpprl-result/work/rl-finance/"
-SAVE_DIR = "/home/supriya/MY_HOME/MPI-SWS/dataset"
+SAVE_DIR = "/NL/tpprl-result/work/rl-finance/"
+# SAVE_DIR = "/home/supriya/MY_HOME/MPI-SWS/dataset"
 HIDDEN_LAYER_DIM = 8
 MAX_AMT = 1000.0
 MAX_SHARE = 100
@@ -380,60 +380,6 @@ class Environment:
         return len(self.list_t_delta)
 
 
-def make_default_trader_opts(seed):
-    """Make default option set."""
-    start_time = 1254130200
-    scope = None
-    decay_steps = 100
-    decay_rate = 0.001
-    num_hidden_states = HIDDEN_LAYER_DIM
-    learning_rate = 0.01
-    clip_norm = 1.0
-    RS = np.random.RandomState(seed)
-    wt = RS.randn(1, 1)
-    W_t = RS.randn(num_hidden_states, 1)
-    Wb_alpha = RS.randn(num_hidden_states, 1)
-    Ws_alpha = RS.randn(num_hidden_states, 1)
-    Wn_b = RS.randn(num_hidden_states, 1)
-    Wn_s = RS.randn(num_hidden_states, 1)
-    W_h = np.array([RS.randn(num_hidden_states, num_hidden_states) * 0.1 + np.diag(np.ones(num_hidden_states))])  # Careful initialization
-    W_1 = RS.randn(num_hidden_states, num_hidden_states)
-    W_2 = RS.randn(num_hidden_states, num_hidden_states)
-    W_3 = RS.randn(num_hidden_states, num_hidden_states)
-    b_t = RS.randn(num_hidden_states, 1)
-    b_alpha = RS.randn(num_hidden_states, 1)
-    bn_b = RS.randn(num_hidden_states, 1)
-    bn_s = RS.randn(num_hidden_states, 1)
-    b_h = RS.randn(num_hidden_states, 1)
-    Vt_h = RS.randn(1, num_hidden_states)
-    Vt_v = RS.randn(1, 1)
-    b_lambda = RS.randn(1, 1)
-    Vh_alpha = RS.randn(2, num_hidden_states)
-    Vv_alpha = RS.randn(2, 1)
-    Va_b = RS.randn(MAX_SHARE, num_hidden_states)
-    Va_s = RS.randn(MAX_SHARE, num_hidden_states)
-
-    # The graph execution time depends on this parameter even though each
-    # trajectory may contain much fewer events. So it is wise to set
-    # it such that it is just above the total number of events likely
-    # to be seen.
-    momentum = 0.9
-    max_events = 1
-    batch_size = 1
-    T = 1254133800
-
-    device_cpu = '/cpu:0'
-    device_gpu = '/gpu:0'
-    only_cpu = False
-    save_dir = SAVE_DIR+"/output_3Apr/"
-    # Expected: './tpprl.summary/train-{}/'.format(run)
-    summary_dir = save_dir+"/summary_dir/"
-    return wt, W_t, Wb_alpha, Ws_alpha, Wn_b, Wn_s, W_h, W_1, W_2, W_3, b_t, b_alpha, bn_b, bn_s,b_h, Vt_h, \
-           Vt_v, b_lambda, Vh_alpha, Vv_alpha, Va_b, Va_s, num_hidden_states, scope, batch_size, learning_rate, \
-           clip_norm, summary_dir, save_dir, decay_steps, decay_rate, momentum, device_cpu, device_gpu, only_cpu,\
-           max_events, T, start_time
-
-
 class ExpRecurrentTrader:
     def __init__(self, wt, W_t, Wb_alpha, Ws_alpha, Wn_b, Wn_s,
                  W_h, W_1, W_2, W_3, b_t, b_alpha, bn_b, bn_s, b_h,
@@ -506,6 +452,14 @@ class ExpRecurrentTrader:
                                                                                        dtype=self.tf_dtype))
                         self.tf_eta_i = tf.get_variable(name='eta_i', initializer=tf.zeros((self.num_hidden_states, 1),
                                                                                            dtype=self.tf_dtype))
+                        # self.tf_h_next = tf.nn.tanh(
+                        #     tf.einsum('aij,ai->aj', self.tf_W_h, self.tf_h_i) +
+                        #     tf.einsum('aij,ai->aj', self.tf_W_1, tau_i) +
+                        #     tf.einsum('aij,ai->aj', self.tf_W_2, b_i) +
+                        #     tf.einsum('aij,ai->aj', self.tf_W_3, eta_i) +
+                        #     tf.squeeze(self.tf_b_h, axis=-1),
+                        #     name='h_next'
+                        # )
 
                 with tf.variable_scope('output'):
                     with tf.device(var_device):
@@ -539,7 +493,7 @@ class ExpRecurrentTrader:
                                                            shape=(self.tf_batch_size, 1),
                                                            dtype=self.tf_dtype)
                     self.tf_batch_last_interval = tf.placeholder(name='last_interval',
-                                                                 shape=self.tf_batch_size,
+                                                                 shape=(self.tf_batch_size, 1),
                                                                  dtype=self.tf_dtype)
                     self.tf_batch_alpha_i = tf.placeholder(name='alpha_i',
                                                            shape=(self.tf_batch_size, self.tf_max_events),
@@ -620,7 +574,7 @@ class ExpRecurrentTrader:
 
                             ((self.h_states_stack, LL_log_terms_stack, LL_int_terms_stack, loss_terms_stack),
                              tf_batch_h_t_mini) = tf.nn.dynamic_rnn(
-                                self.rnn_cell_stack,
+                                cell=self.rnn_cell_stack,
                                 inputs=(tf.expand_dims(self.tf_batch_t_deltas, axis=-1),
                                         tf.expand_dims(self.tf_batch_alpha_i, axis=-1),
                                         tf.expand_dims(self.tf_batch_n_i, axis=-1),
@@ -910,9 +864,62 @@ def read_raw_data():
     # folder = "/home/supriya/MY_HOME/MPI-SWS/dataset"
     # folder = "/NL/tpprl-result/work/rl-finance/"
     # raw = pd.read_csv(folder + "/hourly_data/0_hour.csv")  # header names=['datetime', 'price'])
-    raw = pd.read_csv(SAVE_DIR + "/0_day.csv")
+    raw = pd.read_csv(SAVE_DIR + "/daily_data/0_day.csv")
     df = pd.DataFrame(raw)
     return df
+
+def make_default_trader_opts(seed):
+    """Make default option set."""
+    start_time = 1254130200
+    scope = None
+    decay_steps = 100
+    decay_rate = 0.001
+    num_hidden_states = HIDDEN_LAYER_DIM
+    learning_rate = 0.01
+    clip_norm = 1.0
+    RS = np.random.RandomState(seed)
+    wt = RS.randn(1, 1)
+    W_t = RS.randn(num_hidden_states, 1)
+    Wb_alpha = RS.randn(num_hidden_states, 1)
+    Ws_alpha = RS.randn(num_hidden_states, 1)
+    Wn_b = RS.randn(num_hidden_states, 1)
+    Wn_s = RS.randn(num_hidden_states, 1)
+    W_h = RS.randn(num_hidden_states, num_hidden_states) * 0.1 + np.diag(np.ones(num_hidden_states))  # Careful initialization
+    W_1 = RS.randn(num_hidden_states, num_hidden_states)
+    W_2 = RS.randn(num_hidden_states, num_hidden_states)
+    W_3 = RS.randn(num_hidden_states, num_hidden_states)
+    b_t = RS.randn(num_hidden_states, 1)
+    b_alpha = RS.randn(num_hidden_states, 1)
+    bn_b = RS.randn(num_hidden_states, 1)
+    bn_s = RS.randn(num_hidden_states, 1)
+    b_h = RS.randn(num_hidden_states, 1)
+    Vt_h = RS.randn(1, num_hidden_states)
+    Vt_v = RS.randn(1, 1)
+    b_lambda = RS.randn(1, 1)
+    Vh_alpha = RS.randn(2, num_hidden_states)
+    Vv_alpha = RS.randn(2, 1)
+    Va_b = RS.randn(MAX_SHARE, num_hidden_states)
+    Va_s = RS.randn(MAX_SHARE, num_hidden_states)
+
+    # The graph execution time depends on this parameter even though each
+    # trajectory may contain much fewer events. So it is wise to set
+    # it such that it is just above the total number of events likely
+    # to be seen.
+    momentum = 0.9
+    max_events = 1
+    batch_size = 1
+    T = 1254133800
+
+    device_cpu = '/cpu:0'
+    device_gpu = '/gpu:0'
+    only_cpu = False
+    save_dir = SAVE_DIR+"/output_3Apr/"
+    # Expected: './tpprl.summary/train-{}/'.format(run)
+    summary_dir = save_dir+"/summary_dir/"
+    return wt, W_t, Wb_alpha, Ws_alpha, Wn_b, Wn_s, W_h, W_1, W_2, W_3, b_t, b_alpha, bn_b, bn_s,b_h, Vt_h, \
+           Vt_v, b_lambda, Vh_alpha, Vv_alpha, Va_b, Va_s, num_hidden_states, scope, batch_size, learning_rate, \
+           clip_norm, summary_dir, save_dir, decay_steps, decay_rate, momentum, device_cpu, device_gpu, only_cpu,\
+           max_events, T, start_time
 
 
 def get_feed_dict(trader, mgr):
@@ -1038,6 +1045,7 @@ def test_run_scenario():
 
     # TODO call get_feed_dict
     feed_dict = get_feed_dict(trader=trader, mgr=mgr)
+
 
 if __name__ == '__main__':
     test_run_scenario()
