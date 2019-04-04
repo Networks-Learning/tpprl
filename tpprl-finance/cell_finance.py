@@ -108,9 +108,9 @@ class TPPRExpMarkedCellStacked_finance(tf.contrib.rnn.RNNCell):
             false_fn=lambda: h_prev,
             name="is_h_next_updated"
         )
-        u_theta = self.u_theta(h_prev, t_delta, name='u_theta')
+        u_theta = tf.squeeze(self.u_theta(h_prev, t_delta, name='u_theta'))
         t_0 = tf.zeros(name='zero_time', shape=(inf_batch_size, 1), dtype=self.tf_dtype)
-        u_theta_0 = self.u_theta(h_prev, t_0, name='u_theta_0')
+        u_theta_0 = tf.squeeze(self.u_theta(h_prev, t_0, name='u_theta_0'))
 
         # calculate LL for alpha with sigmoid
         prob_alpha_i = tf.nn.sigmoid(
@@ -119,7 +119,7 @@ class TPPRExpMarkedCellStacked_finance(tf.contrib.rnn.RNNCell):
                         name="add_prob_alphai"),
             name="prob_alpha_i")
         # LL of alpha_i
-        LL_alpha_i = tf.squeeze(tf.log(tf.gather(prob_alpha_i, alpha_i, axis=-1)), axis=-1)
+        LL_alpha_i = tf.squeeze(tf.log(tf.gather(prob_alpha_i, alpha_i, axis=-1)), axis=[-1,-2])
 
         # calculate LL for n_i
         # TODO: apply mask
@@ -130,9 +130,10 @@ class TPPRExpMarkedCellStacked_finance(tf.contrib.rnn.RNNCell):
                 tf.math.floor(
                     tf.squeeze(current_amt) / (v_curr + (tf.scalar_mul(scalar=PERCENTAGE_CHARGES, x=v_curr)))),
                 dtype=tf.int32)) + 1  # to allow buying zero shares
-            mask = tf.cast(tf.expand_dims(
-                tf.concat(tf.ones(max_share_buy, dtype=tf.int32),
-                          tf.zeros(MAX_SHARE + 1 - max_share_buy, dtype=tf.int32)), axis=-1), dtype=tf.float32)
+            ones = tf.ones(shape=[max_share_buy])
+            zeros = tf.zeros(shape=[MAX_SHARE + 1 - max_share_buy])
+            append = tf.concat([ones, zeros], axis=-2)
+            mask = tf.cast(tf.expand_dims(append, axis=-1), dtype=tf.float32)
             exp_A = tf.exp(A)
             masked_A = tf.multiply(mask, exp_A)
             prob_n = masked_A / tf.reduce_sum(masked_A, axis=-1)
@@ -165,18 +166,26 @@ class TPPRExpMarkedCellStacked_finance(tf.contrib.rnn.RNNCell):
         )
 
         # LL of n_i
-        LL_n_i = tf.squeeze(tf.log(tf.gather(prob_n, n_i, axis=-1)), axis=-1)
+        LL_n_i = tf.reshape(tf.log(tf.gather(prob_n, n_i, axis=-1)), shape=[1])
 
         # LL of t_i and delta calculation
-        LL_log = tf.squeeze(tf.log(u_theta), axis=-1)
-        LL_int = (u_theta - u_theta_0) / self.tf_wt
-        loss = (tf.square(u_theta) - tf.square(u_theta_0)) / (2 * self.tf_wt)
+        LL_log = tf.reshape(tf.log(u_theta), shape=[1])
+        LL_int = tf.reshape((u_theta - u_theta_0) / tf.squeeze(self.tf_wt), shape=[1])
+        loss = tf.reshape((tf.square(u_theta) - tf.square(u_theta_0)) / (2 * tf.squeeze(self.tf_wt)), shape=[1,1])
 
+        a = tf.expand_dims(LL_log, axis=-1, name='LL_log')
+        b = tf.expand_dims(LL_int, axis=-1, name='LL_int')
+        c = tf.expand_dims(LL_alpha_i, axis=-1, name='LL_alpha_i')
+        d = tf.expand_dims(LL_n_i, axis=-1, name='LL_n_i')
+        # return ((h_next,
+        #          tf.expand_dims(LL_log, axis=-1, name='LL_log'),
+        #          tf.expand_dims(LL_int, axis=-1, name='LL_int'),
+        #          tf.expand_dims(LL_alpha_i, axis=-1, name='LL_alpha_i'),
+        #          tf.expand_dims(LL_n_i, axis=-1, name='LL_n_i'),
+        #          loss),
+        #         h_next)
         return ((h_next,
-                 tf.expand_dims(LL_log, axis=-1, name='LL_log'),
-                 tf.expand_dims(LL_alpha_i, axis=-1, name='LL_alpha_i'),
-                 tf.expand_dims(LL_n_i, axis=-1, name='LL_n_i'),
-                 LL_int,
+                 a, b, c, d,
                  loss),
                 h_next)
 
@@ -186,10 +195,7 @@ class TPPRExpMarkedCellStacked_finance(tf.contrib.rnn.RNNCell):
         t_0 = tf.zeros(name='zero_time_last', shape=(inf_batch_size, 1), dtype=self.tf_dtype)
         u_theta_0 = self.u_theta(last_h, t_0, name='u_theta_LL_last_0')
         u_theta = self.u_theta(last_h, tf.reshape(last_interval, (-1, 1)), name='u_theta_LL_last')
-        if self.assume_wt_zero:
-            return tf.squeeze(- u_theta * tf.reshape(last_interval, (-1, 1)))
-        else:
-            return tf.squeeze(-(1 / self.tf_wt) * (u_theta - u_theta_0), axis=-1)
+        return tf.squeeze(-(1 / self.tf_wt) * (u_theta - u_theta_0), axis=-1)
 
     def last_loss(self, last_h, last_interval):
         """Calculate the squared loss of the survival term."""
@@ -197,10 +203,7 @@ class TPPRExpMarkedCellStacked_finance(tf.contrib.rnn.RNNCell):
         t_0 = tf.zeros(name='zero_time_last', shape=(inf_batch_size, 1), dtype=self.tf_dtype)
         u_theta_0 = self.u_theta(last_h, t_0, name='u_theta_loss_last_0')
         u_theta = self.u_theta(last_h, tf.reshape(last_interval, (-1, 1)), name='u_theta_loss_last')
-        if self.assume_wt_zero:
-            return tf.squeeze(tf.square(u_theta) * tf.reshape(last_interval, (-1, 1)))
-        else:
-            return tf.squeeze(
+        return tf.squeeze(
                 (1 / (2 * self.tf_wt)) * (
                         tf.square(u_theta) - tf.square(u_theta_0)
                 ),

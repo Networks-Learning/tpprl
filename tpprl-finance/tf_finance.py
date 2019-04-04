@@ -7,8 +7,8 @@ import tensorflow as tf
 from util_finance import _now, variable_summaries
 from cell_finance import TPPRExpMarkedCellStacked_finance
 
-SAVE_DIR = "/NL/tpprl-result/work/rl-finance/"
-# SAVE_DIR = "/home/supriya/MY_HOME/MPI-SWS/dataset"
+# SAVE_DIR = "/NL/tpprl-result/work/rl-finance/"
+SAVE_DIR = "/home/supriya/MY_HOME/MPI-SWS/dataset"
 HIDDEN_LAYER_DIM = 8
 MAX_AMT = 1000.0
 MAX_SHARE = 100
@@ -572,7 +572,7 @@ class ExpRecurrentTrader:
                                 Vv_alpha=self.Vv_alpha_mini, Va_b=self.Va_b_mini, Va_s=self.Va_s_mini
                             )
 
-                            ((self.h_states_stack, LL_log_terms_stack, LL_int_terms_stack, loss_terms_stack),
+                            ((self.h_states_stack, LL_log_terms_stack, LL_int_terms_stack, LL_alpha_i_stack, LL_n_i_stack, loss_terms_stack),
                              tf_batch_h_t_mini) = tf.nn.dynamic_rnn(
                                 cell=self.rnn_cell_stack,
                                 inputs=(tf.expand_dims(self.tf_batch_t_deltas, axis=-1),
@@ -589,6 +589,8 @@ class ExpRecurrentTrader:
 
                             self.LL_log_terms_stack = tf.squeeze(LL_log_terms_stack, axis=-1)
                             self.LL_int_terms_stack = tf.squeeze(LL_int_terms_stack, axis=-1)
+                            self.LL_alpha_i_stack = tf.squeeze(LL_alpha_i_stack, axis=-1)
+                            self.LL_n_i_stack = tf.squeeze(LL_n_i_stack, axis=-1)
                             self.loss_terms_stack = tf.squeeze(loss_terms_stack, axis=-1)
 
                             # LL_last_term_stack = rnn_cell.last_LL(tf_batch_h_t_mini, self.tf_batch_last_interval)
@@ -600,10 +602,10 @@ class ExpRecurrentTrader:
                                                                                       self.tf_batch_last_interval)
 
                             self.LL_stack = (tf.reduce_sum(self.LL_log_terms_stack, axis=1) - tf.reduce_sum(
-                                self.LL_int_terms_stack, axis=1)) + self.LL_last_term_stack
+                                self.LL_int_terms_stack, axis=1)) + self.LL_last_term_stack + self.LL_alpha_i_stack + self.LL_n_i_stack
 
                             tf_seq_len = tf.squeeze(self.tf_batch_seq_len, axis=-1)
-                            self.loss_stack = (self.q / 2) * (tf.reduce_sum(self.loss_terms_stack, axis=1) +
+                            self.loss_stack = (tf.reduce_sum(self.loss_terms_stack, axis=1) +
                                                               self.loss_last_term_stack)
 
                 # with tf.name_scope('calc_u'):
@@ -864,7 +866,8 @@ def read_raw_data():
     # folder = "/home/supriya/MY_HOME/MPI-SWS/dataset"
     # folder = "/NL/tpprl-result/work/rl-finance/"
     # raw = pd.read_csv(folder + "/hourly_data/0_hour.csv")  # header names=['datetime', 'price'])
-    raw = pd.read_csv(SAVE_DIR + "/daily_data/0_day.csv")
+    # raw = pd.read_csv(SAVE_DIR + "/daily_data/0_day.csv")
+    raw = pd.read_csv(SAVE_DIR + "/0_day.csv")
     df = pd.DataFrame(raw)
     return df
 
