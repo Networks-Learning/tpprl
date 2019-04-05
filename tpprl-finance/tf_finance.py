@@ -7,8 +7,8 @@ import tensorflow as tf
 from util_finance import _now, variable_summaries
 from cell_finance import TPPRExpMarkedCellStacked_finance
 
-# SAVE_DIR = "/NL/tpprl-result/work/rl-finance/"
-SAVE_DIR = "/home/supriya/MY_HOME/MPI-SWS/dataset"
+SAVE_DIR = "/NL/tpprl-result/work/rl-finance/"
+# SAVE_DIR = "/home/supriya/MY_HOME/MPI-SWS/dataset"
 HIDDEN_LAYER_DIM = 8
 MAX_AMT = 1000.0
 MAX_SHARE = 100
@@ -42,14 +42,14 @@ class Feedback:
 
 class TradeFeedback(Feedback):
     def __init__(self, t_i, v_curr, alpha_i, n_i, event_curr_amt, portfolio):
-        super(TradeFeedback, self).__init__(t_i, v_curr, is_trade_feedback=1, event_curr_amt=event_curr_amt, portfolio=portfolio)
+        super(TradeFeedback, self).__init__(t_i=t_i, v_curr=v_curr, is_trade_feedback=1, event_curr_amt=event_curr_amt, portfolio=portfolio)
         self.alpha_i = alpha_i
         self.n_i = n_i
 
 
 class TickFeedback(Feedback):
     def __init__(self, t_i, v_curr, event_curr_amt, portfolio):
-        super(TickFeedback, self).__init__(t_i, v_curr, is_trade_feedback=2, event_curr_amt=event_curr_amt, portfolio=portfolio)
+        super(TickFeedback, self).__init__(t_i=t_i, v_curr=v_curr, is_trade_feedback=2, event_curr_amt=event_curr_amt, portfolio=portfolio)
         self.alpha_i = 0
         self.n_i = 0
 
@@ -152,9 +152,9 @@ class RLStrategy(Strategy):
         if self.curr_price is None:
             # This is the first event
             self.curr_price = event.v_curr
-            self.last_price = 0
+            self.last_price = event.v_curr
 
-        # prev_q = self.Q
+        prev_q = self.Q
         if event.is_trade_feedback or self.curr_time is None:
             self.u = self.RS.uniform()
             self.Q = 1
@@ -165,7 +165,7 @@ class RLStrategy(Strategy):
         self.c1 = np.exp(np.array(self.Vt_h).dot(self.h_i) + (self.Vt_v * (self.curr_price - self.last_price)) + self.b_lambda)
         D = 1 - (self.wt / np.exp(self.c1)) * np.log((1 - self.u) / self.Q)
         a = np.squeeze((1-self.u)/self.Q)
-        assert a<1
+        assert a < 1
         assert np.log(D) > 0
 
         self.last_time = event.t_i
@@ -176,11 +176,10 @@ class RLStrategy(Strategy):
         assert self.curr_time >= self.last_time
 
         # update the log likelihood
-        u_theta_0 = np.squeeze(np.exp((self.Vt_h.dot(self.h_i)) + self.b_lambda))
-        self.u_theta_t = np.squeeze(np.exp((self.Vt_h.dot(self.h_i)) + (self.wt * (self.curr_time-self.last_time)) + self.b_lambda))
+        u_theta_0 = self.c1 * np.exp(0.0)
+        self.u_theta_t = self.c1 * np.squeeze(np.exp(self.wt * (self.curr_time-self.last_time)))
 
         # calculate log likelihood
-        # TODO: save current amount, portfolio: num of share in possession, v_curr: DONE in Environment class
         self.loglikelihood += np.squeeze((self.u_theta_t - u_theta_0) / self.wt)  # prob of no event happening
         return self.curr_time
 
@@ -191,9 +190,11 @@ class RLStrategy(Strategy):
         self.h_i = np.tanh(np.array(self.W_h).dot(self.h_i) + np.array(self.W_1).dot(self.tau_i)
                            + np.array(self.W_2).dot(self.b_i) + np.array(self.W_3).dot(self.eta_i) + self.b_h)
         # sample alpha_i
-        prob_alpha = 1 / (1 + np.exp(
+        prob = 1 / (1 + np.exp(
             -np.array(self.Vh_alpha).dot(self.h_i) - np.array(self.Vv_alpha).dot((self.curr_price - self.last_price))))
-        alpha_i = self.RS.choice(np.array([0, 1]), p=np.squeeze(prob_alpha))
+        prob = np.squeeze(prob)
+        prob_alpha = np.array([prob, 1.0-prob])
+        alpha_i = self.RS.choice(np.array([0, 1]), p=prob_alpha)
 
         # return empty trade details when the balance is insufficient to make a trade
         if self.current_amt <= (BASE_CHARGES + event.v_curr * PERCENTAGE_CHARGES):
@@ -280,8 +281,12 @@ class RLStrategy(Strategy):
         else:
             return 1 - np.exp((np.exp(self.c1) / self.wt) * (1 - np.exp(self.wt * (t - self.last_time))))
 
-    def get_LL(self):
-        # TODO: simulation end time
+    def get_LL(self, end_time):
+        self.c1 = np.exp(
+            np.array(self.Vt_h).dot(self.h_i) + (self.Vt_v * (self.curr_price - self.last_price)) + self.b_lambda)
+        u_theta_0 = self.c1 * np.exp(0.0)
+        self.u_theta_t = self.c1 * np.squeeze(np.exp(self.wt * (end_time - self.last_time)))
+        self.loglikelihood += np.squeeze((self.u_theta_t - u_theta_0) / self.wt)
         return self.loglikelihood
 
 
@@ -296,6 +301,7 @@ class Environment:
         self.list_is_trade_feedback = []  # list of type of feedback: it is true if current event is trade
         self.list_current_amount = []  # list of amount available after current trade
         self.list_portfolio = []  # list of number of shares in possession
+        self.list_v_delta = []  # store the difference between price of shares at last and current trade event (not read event)
         self.v_last = 0  # save final value of share, needed to calculate reward
 
         self.time_gap = time_gap
@@ -320,10 +326,11 @@ class Environment:
         self.list_t_delta.append(event.t_i-self.agent.last_time)
         self.list_alpha_i.append(event.alpha_i)
         self.list_n_i.append(event.n_i)
-        self.list_v_curr.append(event.v_curr)
+        self.list_v_curr.append([event.v_curr])
         self.list_is_trade_feedback.append(event.is_trade_feedback)
-        self.list_current_amount.append(event.event_curr_amt)
-        self.list_portfolio.append(event.portfolio)
+        self.list_current_amount.append([event.event_curr_amt])
+        self.list_portfolio.append([event.portfolio])
+        self.list_v_delta.append([event.v_curr-self.agent.last_price])
 
     def simulator(self):
         row_iterator = self.tick_data.iterrows()
@@ -342,6 +349,11 @@ class Environment:
                                                  portfolio=self.agent.owned_shares)
                     # print("reading market value at time {}".format(current_event.t_i))
                     # break
+                    # update the current time to read time
+                    self.curr_time = next_tick.datetime
+                    self.apply_event(current_event)
+                    self.v_last = current_event.v_curr
+                    break
                 else:
                     # TODO update price: interpolate
                     trade_price = current_event.v_curr
@@ -350,12 +362,12 @@ class Environment:
                                                   alpha_i=alpha_i, n_i=n_i, event_curr_amt=self.agent.current_amt,
                                                   portfolio=self.agent.owned_shares)
                     self.agent.update_owned_shares(current_event)
+                    # update the current time to trade time
+                    self.curr_time = next_agent_action_time
+                    self.apply_event(current_event)
+                    self.v_last = current_event.v_curr
 
-                self.apply_event(current_event)
-                self.v_last = current_event.v_curr
-                if not current_event.is_trade_feedback:
-                    break
-        print("LL:", self.agent.get_LL())
+        print("LL:", self.agent.get_LL(end_time=self.T))
 
     def get_last_interval(self):
         return self.T - self.agent.curr_time
@@ -366,14 +378,15 @@ class Environment:
         print("calculating reward...")
         for idx in range(len(self.list_t_delta)):
             if self.list_alpha_i[idx] == 0:
-                reward -= self.list_n_i[idx] * self.list_v_curr[idx]
+                reward -= self.list_n_i[idx] * self.list_v_curr[idx][0]
                 owned_shares += self.list_n_i[idx]
             elif self.list_alpha_i[idx] == 1:
-                reward += self.list_n_i[idx] * self.list_v_curr[idx]
+                reward += self.list_n_i[idx] * self.list_v_curr[idx][0]
                 owned_shares -= self.list_n_i[idx]
             reward -= BASE_CHARGES
-            reward -= (self.list_n_i[idx] * self.list_v_curr[idx] * PERCENTAGE_CHARGES)
+            reward -= (self.list_n_i[idx] * self.list_v_curr[idx][0] * PERCENTAGE_CHARGES)
         reward += owned_shares * self.v_last
+        print("reward:{}".format(reward))
         return reward
 
     def get_num_events(self):
@@ -502,7 +515,7 @@ class ExpRecurrentTrader:
                                                          shape=(self.tf_batch_size, self.tf_max_events),
                                                          dtype=tf.int32)
                     self.tf_batch_v_curr = tf.placeholder(name='v_curr',
-                                                       shape=(self.tf_batch_size, self.tf_max_events),
+                                                       shape=(self.tf_batch_size, self.tf_max_events, self.types_of_portfolio),
                                                        dtype=self.tf_dtype)
                     self.tf_batch_is_trade_feedback = tf.placeholder(name='is_trade_feedback',
                                                        shape=(self.tf_batch_size, self.tf_max_events),
@@ -513,6 +526,9 @@ class ExpRecurrentTrader:
                     self.tf_batch_portfolio = tf.placeholder(name='portfolio',
                                                        shape=(self.tf_batch_size, self.tf_max_events, self.types_of_portfolio),
                                                        dtype=self.tf_dtype)
+                    self.tf_batch_v_deltas = tf.placeholder(name='v_deltas',
+                                                             shape=(self.tf_batch_size, self.tf_max_events, self.types_of_portfolio),
+                                                             dtype=self.tf_dtype)
 
                     # Inferred batch size
                     inf_batch_size = tf.shape(self.tf_batch_t_deltas)[0]
@@ -567,7 +583,7 @@ class ExpRecurrentTrader:
                                 W_3=self.W_3_mini, b_t=self.b_t_mini,
                                 b_alpha=self.b_alpha_mini, bn_b=self.bn_b_mini,
                                 bn_s=self.bn_s_mini, b_h=self.b_h_mini, wt=self.wt_mini,
-                                Vt_h=self.Vt_h_mini, Vt_v=self.Vv_alpha_mini,
+                                Vt_h=self.Vt_h_mini, Vt_v=self.Vt_v_mini,
                                 b_lambda=self.b_lambda_mini, Vh_alpha=self.Vh_alpha_mini,
                                 Vv_alpha=self.Vv_alpha_mini, Va_b=self.Va_b_mini, Va_s=self.Va_s_mini
                             )
@@ -575,13 +591,14 @@ class ExpRecurrentTrader:
                             ((self.h_states_stack, LL_log_terms_stack, LL_int_terms_stack, LL_alpha_i_stack, LL_n_i_stack, loss_terms_stack),
                              tf_batch_h_t_mini) = tf.nn.dynamic_rnn(
                                 cell=self.rnn_cell_stack,
-                                inputs=(tf.expand_dims(self.tf_batch_t_deltas, axis=-1),
-                                        tf.expand_dims(self.tf_batch_alpha_i, axis=-1),
-                                        tf.expand_dims(self.tf_batch_n_i, axis=-1),
-                                        tf.expand_dims(self.tf_batch_v_curr, axis=-1),
-                                        tf.expand_dims(self.tf_batch_is_trade_feedback, axis=-1),
-                                        tf.expand_dims(self.tf_batch_current_amt, axis=-1),
-                                        tf.expand_dims(self.tf_batch_portfolio, axis=-1)),
+                                inputs=(tf.expand_dims(self.tf_batch_t_deltas, axis=-1, name="dynRNN_t_delta"),
+                                        tf.expand_dims(self.tf_batch_alpha_i, axis=-1, name="dynRNN_alpha_i"),
+                                        tf.expand_dims(self.tf_batch_n_i, axis=-1, name="dynRNN_n_i"),
+                                        self.tf_batch_v_curr,
+                                        tf.expand_dims(self.tf_batch_is_trade_feedback, axis=-1, name="dynRNN_is_trade_feedback"),
+                                        self.tf_batch_current_amt,
+                                        self.tf_batch_portfolio,
+                                        self.tf_batch_v_deltas),
                                 sequence_length=tf.squeeze(self.tf_batch_seq_len, axis=-1),
                                 dtype=self.tf_dtype,
                                 initial_state=self.tf_batch_init_h
@@ -596,9 +613,9 @@ class ExpRecurrentTrader:
                             # LL_last_term_stack = rnn_cell.last_LL(tf_batch_h_t_mini, self.tf_batch_last_interval)
                             # loss_last_term_stack = rnn_cell.last_loss(tf_batch_h_t_mini, self.tf_batch_last_interval)
 
-                            self.LL_last_term_stack = self.rnn_cell_stack.last_LL(tf_batch_h_t_mini,
+                            self.LL_last_term_stack = self.rnn_cell_stack.last_LL(tf_batch_h_t_mini, self.tf_batch_v_deltas[-1],
                                                                                   self.tf_batch_last_interval)
-                            self.loss_last_term_stack = self.rnn_cell_stack.last_loss(tf_batch_h_t_mini,
+                            self.loss_last_term_stack = self.rnn_cell_stack.last_loss(tf_batch_h_t_mini, self.tf_batch_v_deltas[-1],
                                                                                       self.tf_batch_last_interval)
 
                             self.LL_stack = (tf.reduce_sum(self.LL_log_terms_stack, axis=1) - tf.reduce_sum(
@@ -662,78 +679,78 @@ class ExpRecurrentTrader:
                                       self.Vh_alpha_mini, self.Vv_alpha_mini, self.Va_b_mini,
                                       self.Va_s_mini]
 
-                with tf.name_scope('stack_grad'):
-                    with tf.device(var_device):
-                        self.LL_grad_stacked = {x: tf.gradients(self.LL_stack, x)
-                                                for x in self.all_mini_vars}
-                        self.loss_grad_stacked = {x: tf.gradients(self.loss_stack, x)
-                                                  for x in self.all_mini_vars}
-                        self.avg_gradient_stack = []
-                        avg_baseline = 0.0
-                        # Removing the average reward + loss is not optimal baseline,
-                        # but still reduces variance significantly.
-                        coef = tf.squeeze(self.tf_batch_rewards, axis=-1) + self.loss_stack - avg_baseline
-                        for x, y in zip(self.all_mini_vars, self.all_tf_vars):
-                            LL_grad = self.LL_grad_stacked[x][0]
-                            loss_grad = self.loss_grad_stacked[x][0]
-                            # if self.set_wt_zero and y == self.tf_wt:
-                            #     self.avg_gradient_stack.append(([0.0], y))
-                            #     continue
-                            dim = len(LL_grad.get_shape())
-                            if dim == 1:
-                                self.avg_gradient_stack.append(
-                                    (tf.reduce_mean(LL_grad * coef + loss_grad, axis=0), y)
-                                )
-                            elif dim == 2:
-                                self.avg_gradient_stack.append(
-                                    (
-                                        tf.reduce_mean(
-                                            LL_grad * tf.tile(tf.reshape(coef, (-1, 1)),
-                                                              [1, tf.shape(LL_grad)[1]]) +
-                                            loss_grad,
-                                            axis=0
-                                        ),
-                                        y
-                                    )
-                                )
-                            elif dim == 3:
-                                self.avg_gradient_stack.append(
-                                    (
-                                        tf.reduce_mean(
-                                            LL_grad * tf.tile(tf.reshape(coef, (-1, 1, 1)),
-                                                              [1, tf.shape(LL_grad)[1], tf.shape(LL_grad)[2]]) +
-                                            loss_grad,
-                                            axis=0
-                                        ),
-                                        y
-                                    )
-                                )
-                        self.clipped_avg_gradients_stack, self.grad_norm_stack = \
-                            tf.clip_by_global_norm(
-                                [grad for grad, _ in self.avg_gradient_stack],
-                                clip_norm=self.clip_norm
-                            )
+                # with tf.name_scope('stack_grad'):
+                #     with tf.device(var_device):
+                #         self.LL_grad_stacked = {x: tf.gradients(self.LL_stack, x)
+                #                                 for x in self.all_mini_vars}
+                #         self.loss_grad_stacked = {x: tf.gradients(self.loss_stack, x)
+                #                                   for x in self.all_mini_vars}
+                #         self.avg_gradient_stack = []
+                #         avg_baseline = 0.0
+                #         # Removing the average reward + loss is not optimal baseline,
+                #         # but still reduces variance significantly.
+                #         coef = tf.squeeze(self.tf_batch_rewards, axis=-1) + self.loss_stack - avg_baseline
+                #         for x, y in zip(self.all_mini_vars, self.all_tf_vars):
+                #             LL_grad = self.LL_grad_stacked[x][0]
+                #             loss_grad = self.loss_grad_stacked[x][0]
+                #             # if self.set_wt_zero and y == self.tf_wt:
+                #             #     self.avg_gradient_stack.append(([0.0], y))
+                #             #     continue
+                #             dim = len(LL_grad.get_shape())
+                #             if dim == 1:
+                #                 self.avg_gradient_stack.append(
+                #                     (tf.reduce_mean(LL_grad * coef + loss_grad, axis=0), y)
+                #                 )
+                #             elif dim == 2:
+                #                 self.avg_gradient_stack.append(
+                #                     (
+                #                         tf.reduce_mean(
+                #                             LL_grad * tf.tile(tf.reshape(coef, (-1, 1)),
+                #                                               [1, tf.shape(LL_grad)[1]]) +
+                #                             loss_grad,
+                #                             axis=0
+                #                         ),
+                #                         y
+                #                     )
+                #                 )
+                #             elif dim == 3:
+                #                 self.avg_gradient_stack.append(
+                #                     (
+                #                         tf.reduce_mean(
+                #                             LL_grad * tf.tile(tf.reshape(coef, (-1, 1, 1)),
+                #                                               [1, tf.shape(LL_grad)[1], tf.shape(LL_grad)[2]]) +
+                #                             loss_grad,
+                #                             axis=0
+                #                         ),
+                #                         y
+                #                     )
+                #                 )
+                #         self.clipped_avg_gradients_stack, self.grad_norm_stack = \
+                #             tf.clip_by_global_norm(
+                #                 [grad for grad, _ in self.avg_gradient_stack],
+                #                 clip_norm=self.clip_norm
+                #             )
+                #
+                #         self.clipped_avg_gradient_stack = list(zip(
+                #             self.clipped_avg_gradients_stack,
+                #             [var for _, var in self.avg_gradient_stack]
+                #         ))
 
-                        self.clipped_avg_gradient_stack = list(zip(
-                            self.clipped_avg_gradients_stack,
-                            [var for _, var in self.avg_gradient_stack]
-                        ))
-
-                self.tf_learning_rate = tf.train.inverse_time_decay(
-                    self.learning_rate,
-                    global_step=self.global_step,
-                    decay_steps=self.decay_steps,
-                    decay_rate=self.decay_rate
-                )
-
-                self.opt = tf.train.AdamOptimizer(
-                    learning_rate=self.tf_learning_rate,
-                    beta1=momentum
-                )
-                self.sgd_stacked_op = self.opt.apply_gradients(
-                    self.clipped_avg_gradient_stack,
-                    global_step=self.global_step
-                )
+                # self.tf_learning_rate = tf.train.inverse_time_decay(
+                #     self.learning_rate,
+                #     global_step=self.global_step,
+                #     decay_steps=self.decay_steps,
+                #     decay_rate=self.decay_rate
+                # )
+                #
+                # self.opt = tf.train.AdamOptimizer(
+                #     learning_rate=self.tf_learning_rate,
+                #     beta1=momentum
+                # )
+                # self.sgd_stacked_op = self.opt.apply_gradients(
+                #     self.clipped_avg_gradient_stack,
+                #     global_step=self.global_step
+                # )
 
                 self.sess = sess
 
@@ -745,24 +762,24 @@ class ExpRecurrentTrader:
                     max_to_keep=1000
                 )
 
-                with tf.device(device_cpu):
-                    tf.contrib.training.add_gradients_summaries(self.avg_gradient_stack)
-
-                    for v in self.all_tf_vars:
-                        variable_summaries(v)
-
-                    variable_summaries(self.tf_learning_rate, name='learning_rate')
-                    variable_summaries(self.loss_stack, name='loss_stack')
-                    variable_summaries(self.LL_stack, name='LL_stack')
-                    variable_summaries(self.loss_last_term_stack, name='loss_last_term_stack')
-                    variable_summaries(self.LL_last_term_stack, name='LL_last_term_stack')
-                    variable_summaries(self.h_states_stack, name='hidden_states_stack')
-                    variable_summaries(self.LL_log_terms_stack, name='LL_log_terms_stack')
-                    variable_summaries(self.LL_int_terms_stack, name='LL_int_terms_stack')
-                    variable_summaries(self.loss_terms_stack, name='loss_terms_stack')
-                    variable_summaries(tf.cast(self.tf_batch_seq_len, self.tf_dtype), name='batch_seq_len')
-
-                    self.tf_merged_summaries = tf.summary.merge_all()
+                # with tf.device(device_cpu):
+                #     tf.contrib.training.add_gradients_summaries(self.avg_gradient_stack)
+                #
+                #     for v in self.all_tf_vars:
+                #         variable_summaries(v)
+                #
+                #     variable_summaries(self.tf_learning_rate, name='learning_rate')
+                #     variable_summaries(self.loss_stack, name='loss_stack')
+                #     variable_summaries(self.LL_stack, name='LL_stack')
+                #     variable_summaries(self.loss_last_term_stack, name='loss_last_term_stack')
+                #     variable_summaries(self.LL_last_term_stack, name='LL_last_term_stack')
+                #     variable_summaries(self.h_states_stack, name='hidden_states_stack')
+                #     variable_summaries(self.LL_log_terms_stack, name='LL_log_terms_stack')
+                #     variable_summaries(self.LL_int_terms_stack, name='LL_int_terms_stack')
+                #     variable_summaries(self.loss_terms_stack, name='loss_terms_stack')
+                #     variable_summaries(tf.cast(self.tf_batch_seq_len, self.tf_dtype), name='batch_seq_len')
+                #
+                #     self.tf_merged_summaries = tf.summary.merge_all()
 
     def initialize(self, finalize=True):
         """Initialize the graph."""
@@ -866,8 +883,8 @@ def read_raw_data():
     # folder = "/home/supriya/MY_HOME/MPI-SWS/dataset"
     # folder = "/NL/tpprl-result/work/rl-finance/"
     # raw = pd.read_csv(folder + "/hourly_data/0_hour.csv")  # header names=['datetime', 'price'])
-    # raw = pd.read_csv(SAVE_DIR + "/daily_data/0_day.csv")
-    raw = pd.read_csv(SAVE_DIR + "/0_day.csv")
+    raw = pd.read_csv(SAVE_DIR + "/daily_data/0_day.csv")
+    # raw = pd.read_csv(SAVE_DIR + "/0_day.csv")
     df = pd.DataFrame(raw)
     return df
 
@@ -882,6 +899,28 @@ def make_default_trader_opts(seed):
     clip_norm = 1.0
     RS = np.random.RandomState(seed)
     wt = RS.randn(1, 1)
+    # W_t = np.zeros((num_hidden_states, 1))
+    # Wb_alpha = np.zeros((num_hidden_states, 1))
+    # Ws_alpha = np.zeros((num_hidden_states, 1))
+    # Wn_b = np.zeros((num_hidden_states, 1))
+    # Wn_s = np.zeros((num_hidden_states, 1))
+    # W_h = np.zeros((num_hidden_states, num_hidden_states))
+    # W_1 = np.zeros((num_hidden_states, num_hidden_states))
+    # W_2 = np.zeros((num_hidden_states, num_hidden_states))
+    # W_3 = np.zeros((num_hidden_states, num_hidden_states))
+    # b_t = np.zeros((num_hidden_states, 1))
+    # b_alpha = np.zeros((num_hidden_states, 1))
+    # bn_b = np.zeros((num_hidden_states, 1))
+    # bn_s = np.zeros((num_hidden_states, 1))
+    # b_h = np.zeros((num_hidden_states, 1))
+    # Vt_h = np.zeros((1, num_hidden_states))
+    # Vt_v = np.zeros((1, 1))
+    # b_lambda = np.zeros((1, 1))
+    # Vh_alpha = np.zeros((2, num_hidden_states))
+    # Vv_alpha = np.zeros((2, 1))
+    # Va_b = np.zeros((100, num_hidden_states))
+    # Va_s = np.zeros((100, num_hidden_states))
+
     W_t = RS.randn(num_hidden_states, 1)
     Wb_alpha = RS.randn(num_hidden_states, 1)
     Ws_alpha = RS.randn(num_hidden_states, 1)
@@ -899,8 +938,8 @@ def make_default_trader_opts(seed):
     Vt_h = RS.randn(1, num_hidden_states)
     Vt_v = RS.randn(1, 1)
     b_lambda = RS.randn(1, 1)
-    Vh_alpha = RS.randn(2, num_hidden_states)
-    Vv_alpha = RS.randn(2, 1)
+    Vh_alpha = RS.randn(1, num_hidden_states)
+    Vv_alpha = RS.randn(1, 1)
     Va_b = RS.randn(MAX_SHARE, num_hidden_states)
     Va_s = RS.randn(MAX_SHARE, num_hidden_states)
 
@@ -911,12 +950,12 @@ def make_default_trader_opts(seed):
     momentum = 0.9
     max_events = 1
     batch_size = 1
-    T = 1254133800
+    T = 1254130210  # 1254133800
 
     device_cpu = '/cpu:0'
     device_gpu = '/gpu:0'
-    only_cpu = False
-    save_dir = SAVE_DIR+"/output_3Apr/"
+    only_cpu = True
+    save_dir = SAVE_DIR+"/results_TF_RL/"
     # Expected: './tpprl.summary/train-{}/'.format(run)
     summary_dir = save_dir+"/summary_dir/"
     return wt, W_t, Wb_alpha, Ws_alpha, Wn_b, Wn_s, W_h, W_1, W_2, W_3, b_t, b_alpha, bn_b, bn_s,b_h, Vt_h, \
@@ -934,22 +973,22 @@ def get_feed_dict(trader, mgr):
     types_of_portfolio = 1
 
     full_shape = (batch_size, max_events)
-    portfolio_shape = (batch_size, types_of_portfolio, max_events)
+    portfolio_shape = (batch_size, max_events, types_of_portfolio)
     batch_rewards = np.asarray([mgr.reward_fn()])[:, np.newaxis]
 
-    batch_last_interval = np.asarray([mgr.get_last_interval()], dtype=float)
+    batch_last_interval = np.reshape(np.asarray([mgr.get_last_interval()], dtype=float), newshape=(batch_size, 1))
 
     batch_seq_len = np.asarray([mgr.get_num_events()], dtype=float)[:, np.newaxis]
 
     batch_t_delta = np.zeros(shape=full_shape, dtype=float)
     batch_alpha_i = np.zeros(shape=full_shape, dtype=int)
     batch_n_i = np.zeros(shape=full_shape, dtype=float)
-    batch_v_curr = np.zeros(shape=full_shape, dtype=float)
-    batch_is_trade_feedback = np.zeros(shape=full_shape, dtype=int)  # TODO: array of booleans
+    batch_v_curr = np.zeros(shape=portfolio_shape, dtype=float)
+    batch_is_trade_feedback = np.zeros(shape=full_shape, dtype=int)
     batch_current_amount = np.zeros(shape=portfolio_shape, dtype=float)
-    batch_portfolio = np.zeros(shape=portfolio_shape, dtype=float)  # TODO: with shape portfolio_shape
+    batch_portfolio = np.zeros(shape=portfolio_shape, dtype=float)
     batch_init_h = np.zeros(shape=(batch_size, trader.num_hidden_states), dtype=float)
-
+    batch_v_delta = np.zeros(shape=portfolio_shape, dtype=float)  # TODO storing v_delta
     batch_len = int(batch_seq_len)
 
     batch_t_delta[0:batch_len] = mgr.list_t_delta
@@ -959,14 +998,7 @@ def get_feed_dict(trader, mgr):
     batch_is_trade_feedback[0:batch_len] = mgr.list_is_trade_feedback
     batch_current_amount[0:batch_len] = mgr.list_current_amount
     batch_portfolio[0:batch_len] = mgr.list_portfolio
-
-    # for idx, scen in enumerate(mgr):
-    #     # They are sorted by time already.
-    #     # TODO fill in current_amount, current_portfolio, event_type
-    #     batch_len = int(batch_seq_len[idx])
-    #     batch_alpha_i[idx, 0:batch_len] = scen.alpha_i   # TODO in Environment
-    #     batch_t_deltas[idx, 0:batch_len] = scen.time_deltas
-    #     batch_n_i[idx, 0:batch_len] = scen.n_i
+    batch_v_delta[0:batch_len] = mgr.list_v_delta
 
     return {
         trader.tf_batch_t_deltas: batch_t_delta,
@@ -976,6 +1008,7 @@ def get_feed_dict(trader, mgr):
         trader.tf_batch_is_trade_feedback: batch_is_trade_feedback,
         trader.tf_batch_current_amt: batch_current_amount,
         trader.tf_batch_portfolio: batch_portfolio,
+        trader.tf_batch_v_deltas:batch_v_delta,
 
         trader.tf_batch_rewards: batch_rewards,
         trader.tf_batch_seq_len: batch_seq_len,
@@ -1040,6 +1073,7 @@ def test_run_scenario():
                                 batch_size=batch_size, learning_rate=learning_rate, clip_norm=clip_norm, summary_dir=summary_dir,
                                 save_dir=save_dir, decay_steps=decay_steps, decay_rate=decay_rate, momentum=momentum,
                                 device_cpu=device_cpu, device_gpu=device_gpu, only_cpu=only_cpu, max_events=max_events)
+    trader.initialize()
     print("trader created")
 
     # TODO call run_scenario
@@ -1048,6 +1082,14 @@ def test_run_scenario():
 
     # TODO call get_feed_dict
     feed_dict = get_feed_dict(trader=trader, mgr=mgr)
+    # rwd = list(feed_dict.keys())[8]
+    # print(feed_dict[rwd])
+    print('NN LL = {}'.format(mgr.agent.get_LL(end_time=T)))
+    print('TF LL = {}'.format(trader.sess.run([trader.LL_stack], feed_dict=feed_dict)))
+    # import json
+    # with open(save_dir+"/tf_feed_dict.json","w") as outfile:
+    #     json.dump(feed_dict, outfile)
+    # print("feed_dict saved as json at location:{}".format(save_dir+"/tf_feed_dict.json"))
 
 
 if __name__ == '__main__':
