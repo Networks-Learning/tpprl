@@ -1,3 +1,5 @@
+# TODO: Numpy_LL and TF_LL not same
+# TODO: tf_n_i_LL has -inf
 import sys
 import pandas as pd
 import numpy as np
@@ -14,7 +16,7 @@ MAX_AMT = 1000.0
 MAX_SHARE = 100
 BASE_CHARGES = 1.0
 PERCENTAGE_CHARGES = 0.001
-
+EPSILON = 1e-6
 
 class Action:
     def __init__(self, alpha, n):
@@ -34,24 +36,27 @@ class Feedback:
         self.portfolio = portfolio
 
     def is_trade_event(self):
-        return self.is_trade_feedback==1
+        return self.is_trade_feedback == 1
 
     def is_tick_event(self):
-        return self.is_trade_feedback==2
+        return self.is_trade_feedback == 2
 
 
 class TradeFeedback(Feedback):
     def __init__(self, t_i, v_curr, alpha_i, n_i, event_curr_amt, portfolio):
-        super(TradeFeedback, self).__init__(t_i=t_i, v_curr=v_curr, is_trade_feedback=1, event_curr_amt=event_curr_amt, portfolio=portfolio)
+        super(TradeFeedback, self).__init__(t_i=t_i, v_curr=v_curr, is_trade_feedback=1, event_curr_amt=event_curr_amt,
+                                            portfolio=portfolio)
         self.alpha_i = alpha_i
         self.n_i = n_i
 
 
 class TickFeedback(Feedback):
     def __init__(self, t_i, v_curr, event_curr_amt, portfolio):
-        super(TickFeedback, self).__init__(t_i=t_i, v_curr=v_curr, is_trade_feedback=2, event_curr_amt=event_curr_amt, portfolio=portfolio)
+        super(TickFeedback, self).__init__(t_i=t_i, v_curr=v_curr, is_trade_feedback=2, event_curr_amt=event_curr_amt,
+                                           portfolio=portfolio)
         self.alpha_i = 0
         self.n_i = 0
+
 
 # class State:
 #     def __init__(self, curr_time):
@@ -100,7 +105,7 @@ class Strategy:
             self.owned_shares -= event.n_i
             # self.current_amt += event.n_i * event.v_curr
 
-        assert self.current_amt>0
+        assert self.current_amt > 0
 
 
 class RLStrategy(Strategy):
@@ -132,10 +137,10 @@ class RLStrategy(Strategy):
         self.Va_b = Va_b
         self.Va_s = Va_s
 
-        self.tau_i = np.zeros((HIDDEN_LAYER_DIM,1))
+        self.tau_i = np.zeros((HIDDEN_LAYER_DIM, 1))
         self.b_i = np.zeros((HIDDEN_LAYER_DIM, 1))
         self.eta_i = np.zeros((HIDDEN_LAYER_DIM, 1))
-        self.h_i = np.zeros((HIDDEN_LAYER_DIM,1))
+        self.h_i = np.zeros((HIDDEN_LAYER_DIM, 1))
         self.u_theta_t = 0
         self.last_time = 0.0
         self.curr_time = None
@@ -162,9 +167,10 @@ class RLStrategy(Strategy):
             self.Q *= (1 - self.cdf(event.t_i))
 
         # sample t_i
-        self.c1 = np.exp(np.array(self.Vt_h).dot(self.h_i) + (self.Vt_v * (self.curr_price - self.last_price)) + self.b_lambda)
+        self.c1 = np.exp(
+            np.array(self.Vt_h).dot(self.h_i) + (self.Vt_v * (self.curr_price - self.last_price)) + self.b_lambda)
         D = 1 - (self.wt / np.exp(self.c1)) * np.log((1 - self.u) / self.Q)
-        a = np.squeeze((1-self.u)/self.Q)
+        a = np.squeeze((1 - self.u) / self.Q)
         assert a < 1
         assert np.log(D) > 0
 
@@ -177,23 +183,23 @@ class RLStrategy(Strategy):
 
         # update the log likelihood
         u_theta_0 = self.c1 * np.exp(0.0)
-        self.u_theta_t = self.c1 * np.squeeze(np.exp(self.wt * (self.curr_time-self.last_time)))
+        self.u_theta_t = self.c1 * np.squeeze(np.exp(self.wt * (self.curr_time - self.last_time)))
 
         # calculate log likelihood
-        self.loglikelihood += np.squeeze((self.u_theta_t - u_theta_0) / self.wt)  # prob of no event happening
+        # self.loglikelihood += np.squeeze((self.u_theta_t - u_theta_0) / self.wt)  # prob of no event happening
         return self.curr_time
 
     def get_next_action_item(self, event):
         self.last_price = self.curr_price
         self.curr_price = event.v_curr
-        # update h_i
+        # update h_i i.e. h_next
         self.h_i = np.tanh(np.array(self.W_h).dot(self.h_i) + np.array(self.W_1).dot(self.tau_i)
                            + np.array(self.W_2).dot(self.b_i) + np.array(self.W_3).dot(self.eta_i) + self.b_h)
         # sample alpha_i
         prob = 1 / (1 + np.exp(
             -np.array(self.Vh_alpha).dot(self.h_i) - np.array(self.Vv_alpha).dot((self.curr_price - self.last_price))))
         prob = np.squeeze(prob)
-        prob_alpha = np.array([prob, 1.0-prob])
+        prob_alpha = np.array([prob, 1.0 - prob])
         alpha_i = self.RS.choice(np.array([0, 1]), p=prob_alpha)
 
         # return empty trade details when the balance is insufficient to make a trade
@@ -206,43 +212,65 @@ class RLStrategy(Strategy):
         assert self.current_amt > 0
         if alpha_i == 0:
             A = np.array(self.Va_b).dot(self.h_i)
-            A = np.append(np.array([[1]]), A, axis=0)
+            if np.all([np.equal(ele, 0.0) for ele in A]):
+                A[0] = 1.0
+            # A = np.append(np.array([[1]]), A, axis=0)
 
             # calculate mask
-            max_share_buy = min(MAX_SHARE, int(np.floor(self.current_amt /
-                                                        (event.v_curr+(event.v_curr*PERCENTAGE_CHARGES)))))+1  # to allow buying zero shares
+            max_share_buy = max(1, min(MAX_SHARE, int(np.floor(self.current_amt /
+                                                        (event.v_curr + (
+                                                                event.v_curr * PERCENTAGE_CHARGES))))))
             mask = np.expand_dims(np.append(np.ones(max_share_buy),
-                                            np.zeros(MAX_SHARE+1 - max_share_buy)), axis=1)  # total size is 101
+                                            np.zeros(MAX_SHARE - max_share_buy)), axis=1)
 
             # apply mask
-            masked_A = np.multiply(mask, A)
-            masked_A[:max_share_buy] = np.exp(masked_A[:max_share_buy])
-            prob_n = masked_A / np.sum(masked_A[:max_share_buy])
+            # masked_A = np.multiply(mask, A)
+            # masked_A[:max_share_buy] = np.exp(masked_A[:max_share_buy])
+            # prob_n = masked_A / np.sum(masked_A[:max_share_buy])
+            exp_A = np.exp(A)
+            masked_A = np.multiply(mask, exp_A)
+
+            reduce_sum = np.sum(masked_A)
+            # check if the sum is zero and assign epsilon to avoid divide by zero and NaN value
+            if np.abs(reduce_sum)< EPSILON:
+                reduce_sum = EPSILON
+            prob_n = masked_A / reduce_sum
             prob_n = np.squeeze(prob_n)
 
             # sample
-            n_i = self.RS.choice(np.arange(MAX_SHARE+1), p=np.squeeze(prob_n))
+            n_i = self.RS.choice(np.arange(MAX_SHARE), p=np.squeeze(prob_n))
             # self.owned_shares += n_i
             # a = event.v_curr * n_i
             # self.current_amt -= a
             # assert self.current_amt > 0
         else:
             A = np.array(self.Va_b).dot(self.h_i)
-            A = np.append(np.array([[1]]), A, axis=0)
-            num_share_sell = int((self.owned_shares*event.v_curr)/
-                                 (event.v_curr+(event.v_curr*PERCENTAGE_CHARGES)))
-            max_share_sell = min(MAX_SHARE, num_share_sell)+1  # to allow buying zero shares
+            if np.all([np.equal(ele, 0.0) for ele in A]):
+                A[0] = 1.0
+            # A[0] = 1.0
+            # A = np.append(np.array([[1]]), A, axis=0)
+            num_share_sell = int((self.owned_shares * event.v_curr) /
+                                 (event.v_curr + (event.v_curr * PERCENTAGE_CHARGES)))
+            max_share_sell = max(1, min(MAX_SHARE, num_share_sell))  #+ 1  # to allow buying zero shares
             mask = np.expand_dims(np.append(np.ones(max_share_sell),
-                                            np.zeros(MAX_SHARE+1-max_share_sell)), axis=1)  # total size is 101
+                                            np.zeros(MAX_SHARE - max_share_sell)), axis=1)  # total size is 101
 
             # apply mask
-            masked_A = np.multiply(mask, A)
-            masked_A[:max_share_sell] = np.exp(masked_A[:max_share_sell])
-            prob_n = masked_A / np.sum(masked_A[:max_share_sell])
+            # masked_A = np.multiply(mask, A)
+            # masked_A[:max_share_sell] = np.exp(masked_A[:max_share_sell])
+            # prob_n = masked_A / np.sum(masked_A[:max_share_sell])
+            exp_A = np.exp(A)
+            masked_A = np.multiply(mask, exp_A)
+            # prob_n = masked_A / np.sum(masked_A)
+            reduce_sum = np.sum(masked_A)
+            # check if the sum is zero and assign epsilon to avoid divide by zero and NaN value
+            if np.abs(reduce_sum) < EPSILON:
+                reduce_sum = EPSILON
+            prob_n = masked_A / reduce_sum
             prob_n = np.squeeze(prob_n)
 
             # sample
-            n_i = self.RS.choice(np.arange(MAX_SHARE+1), p=np.squeeze(prob_n))
+            n_i = self.RS.choice(np.arange(MAX_SHARE), p=np.squeeze(prob_n))
             # self.owned_shares -= n_i
             # self.current_amt += event.v_curr * n_i
             # assert self.current_amt > 0
@@ -269,8 +297,9 @@ class RLStrategy(Strategy):
         assert self.current_amt > a
         self.current_amt -= a
         assert self.current_amt > 0
+
         # update log likelihood
-        self.loglikelihood += np.squeeze(np.log(self.u_theta_t) + np.log(prob_alpha[alpha_i]) + np.log(prob_n[n_i]))
+        self.loglikelihood += np.squeeze(np.log(self.u_theta_t))  # + np.log(prob_alpha[alpha_i]))# + np.log(prob_n[n_i]))
 
         return alpha_i, n_i
 
@@ -282,11 +311,12 @@ class RLStrategy(Strategy):
             return 1 - np.exp((np.exp(self.c1) / self.wt) * (1 - np.exp(self.wt * (t - self.last_time))))
 
     def get_LL(self, end_time):
-        self.c1 = np.exp(
-            np.array(self.Vt_h).dot(self.h_i) + (self.Vt_v * (self.curr_price - self.last_price)) + self.b_lambda)
-        u_theta_0 = self.c1 * np.exp(0.0)
-        self.u_theta_t = self.c1 * np.squeeze(np.exp(self.wt * (end_time - self.last_time)))
-        self.loglikelihood += np.squeeze((self.u_theta_t - u_theta_0) / self.wt)
+        # add LL for last interval
+        # self.c1 = np.exp(
+        #     np.array(self.Vt_h).dot(self.h_i) + (self.Vt_v * (self.curr_price - self.last_price)) + self.b_lambda)
+        # u_theta_0 = self.c1 * np.exp(0.0)
+        # self.u_theta_t = self.c1 * np.squeeze(np.exp(self.wt * (end_time - self.last_time)))
+        # self.loglikelihood += np.squeeze((self.u_theta_t - u_theta_0) / self.wt)
         return self.loglikelihood
 
 
@@ -323,14 +353,14 @@ class Environment:
     # def get_state(self):
     #     return self.state
     def apply_event(self, event):
-        self.list_t_delta.append(event.t_i-self.agent.last_time)
+        self.list_t_delta.append(event.t_i - self.agent.last_time)
         self.list_alpha_i.append(event.alpha_i)
         self.list_n_i.append(event.n_i)
         self.list_v_curr.append([event.v_curr])
         self.list_is_trade_feedback.append(event.is_trade_feedback)
         self.list_current_amount.append([event.event_curr_amt])
         self.list_portfolio.append([event.portfolio])
-        self.list_v_delta.append([event.v_curr-self.agent.last_price])
+        self.list_v_delta.append([event.v_curr - self.agent.last_price])
 
     def simulator(self):
         row_iterator = self.tick_data.iterrows()
@@ -370,7 +400,7 @@ class Environment:
         print("LL:", self.agent.get_LL(end_time=self.T))
 
     def get_last_interval(self):
-        return self.T - self.agent.curr_time
+        return self.T - self.agent.last_time
 
     def reward_fn(self):
         reward = MAX_AMT
@@ -512,23 +542,27 @@ class ExpRecurrentTrader:
                                                            shape=(self.tf_batch_size, self.tf_max_events),
                                                            dtype=tf.int32)
                     self.tf_batch_n_i = tf.placeholder(name='n_i',
-                                                         shape=(self.tf_batch_size, self.tf_max_events),
-                                                         dtype=tf.int32)
-                    self.tf_batch_v_curr = tf.placeholder(name='v_curr',
-                                                       shape=(self.tf_batch_size, self.tf_max_events, self.types_of_portfolio),
-                                                       dtype=self.tf_dtype)
-                    self.tf_batch_is_trade_feedback = tf.placeholder(name='is_trade_feedback',
                                                        shape=(self.tf_batch_size, self.tf_max_events),
-                                                       dtype=self.tf_dtype)
+                                                       dtype=tf.int32)
+                    self.tf_batch_v_curr = tf.placeholder(name='v_curr',
+                                                          shape=(self.tf_batch_size, self.tf_max_events,
+                                                                 self.types_of_portfolio),
+                                                          dtype=self.tf_dtype)
+                    self.tf_batch_is_trade_feedback = tf.placeholder(name='is_trade_feedback',
+                                                                     shape=(self.tf_batch_size, self.tf_max_events),
+                                                                     dtype=self.tf_dtype)
                     self.tf_batch_current_amt = tf.placeholder(name='current_amt',
-                                                       shape=(self.tf_batch_size, self.tf_max_events, self.types_of_portfolio),
-                                                       dtype=self.tf_dtype)
+                                                               shape=(self.tf_batch_size, self.tf_max_events,
+                                                                      self.types_of_portfolio),
+                                                               dtype=self.tf_dtype)
                     self.tf_batch_portfolio = tf.placeholder(name='portfolio',
-                                                       shape=(self.tf_batch_size, self.tf_max_events, self.types_of_portfolio),
-                                                       dtype=self.tf_dtype)
-                    self.tf_batch_v_deltas = tf.placeholder(name='v_deltas',
-                                                             shape=(self.tf_batch_size, self.tf_max_events, self.types_of_portfolio),
+                                                             shape=(self.tf_batch_size, self.tf_max_events,
+                                                                    self.types_of_portfolio),
                                                              dtype=self.tf_dtype)
+                    self.tf_batch_v_deltas = tf.placeholder(name='v_deltas',
+                                                            shape=(self.tf_batch_size, self.tf_max_events,
+                                                                   self.types_of_portfolio),
+                                                            dtype=self.tf_dtype)
 
                     # Inferred batch size
                     inf_batch_size = tf.shape(self.tf_batch_t_deltas)[0]
@@ -588,14 +622,16 @@ class ExpRecurrentTrader:
                                 Vv_alpha=self.Vv_alpha_mini, Va_b=self.Va_b_mini, Va_s=self.Va_s_mini
                             )
 
-                            ((self.h_states_stack, LL_log_terms_stack, LL_int_terms_stack, LL_alpha_i_stack, LL_n_i_stack, loss_terms_stack),
+                            ((self.h_states_stack, LL_log_terms_stack, LL_int_terms_stack, LL_alpha_i_stack,
+                              LL_n_i_stack, loss_terms_stack),
                              tf_batch_h_t_mini) = tf.nn.dynamic_rnn(
                                 cell=self.rnn_cell_stack,
                                 inputs=(tf.expand_dims(self.tf_batch_t_deltas, axis=-1, name="dynRNN_t_delta"),
                                         tf.expand_dims(self.tf_batch_alpha_i, axis=-1, name="dynRNN_alpha_i"),
                                         tf.expand_dims(self.tf_batch_n_i, axis=-1, name="dynRNN_n_i"),
                                         self.tf_batch_v_curr,
-                                        tf.expand_dims(self.tf_batch_is_trade_feedback, axis=-1, name="dynRNN_is_trade_feedback"),
+                                        tf.expand_dims(self.tf_batch_is_trade_feedback, axis=-1,
+                                                       name="dynRNN_is_trade_feedback"),
                                         self.tf_batch_current_amt,
                                         self.tf_batch_portfolio,
                                         self.tf_batch_v_deltas),
@@ -613,17 +649,22 @@ class ExpRecurrentTrader:
                             # LL_last_term_stack = rnn_cell.last_LL(tf_batch_h_t_mini, self.tf_batch_last_interval)
                             # loss_last_term_stack = rnn_cell.last_loss(tf_batch_h_t_mini, self.tf_batch_last_interval)
 
-                            self.LL_last_term_stack = self.rnn_cell_stack.last_LL(tf_batch_h_t_mini, self.tf_batch_v_deltas[-1],
+                            self.LL_last_term_stack = self.rnn_cell_stack.last_LL(tf_batch_h_t_mini,
+                                                                                  self.tf_batch_v_deltas[:, -1, :],
                                                                                   self.tf_batch_last_interval)
-                            self.loss_last_term_stack = self.rnn_cell_stack.last_loss(tf_batch_h_t_mini, self.tf_batch_v_deltas[-1],
+                            self.loss_last_term_stack = self.rnn_cell_stack.last_loss(tf_batch_h_t_mini,
+                                                                                      self.tf_batch_v_deltas[-1],
                                                                                       self.tf_batch_last_interval)
 
-                            self.LL_stack = (tf.reduce_sum(self.LL_log_terms_stack, axis=1) - tf.reduce_sum(
-                                self.LL_int_terms_stack, axis=1)) + self.LL_last_term_stack + self.LL_alpha_i_stack + self.LL_n_i_stack
+                            self.LL_stack = tf.reduce_sum(self.LL_log_terms_stack, axis=1) #-\
+                                             # tf.reduce_sum(self.LL_int_terms_stack, axis=1) #+ \
+                                            # self.LL_last_term_stack #+ \
+                                            # tf.reduce_sum(self.LL_alpha_i_stack, axis=1)  # + \
+                            # tf.reduce_sum(self.LL_n_i_stack, axis=1)
 
                             tf_seq_len = tf.squeeze(self.tf_batch_seq_len, axis=-1)
                             self.loss_stack = (tf.reduce_sum(self.loss_terms_stack, axis=1) +
-                                                              self.loss_last_term_stack)
+                                               self.loss_last_term_stack)
 
                 # with tf.name_scope('calc_u'):
                 #     with tf.device(var_device):
@@ -888,6 +929,7 @@ def read_raw_data():
     df = pd.DataFrame(raw)
     return df
 
+
 def make_default_trader_opts(seed):
     """Make default option set."""
     start_time = 1254130200
@@ -899,6 +941,7 @@ def make_default_trader_opts(seed):
     clip_norm = 1.0
     RS = np.random.RandomState(seed)
     wt = RS.randn(1, 1)
+    print("numpy_wt={}".format(wt))
     # W_t = np.zeros((num_hidden_states, 1))
     # Wb_alpha = np.zeros((num_hidden_states, 1))
     # Ws_alpha = np.zeros((num_hidden_states, 1))
@@ -916,8 +959,8 @@ def make_default_trader_opts(seed):
     # Vt_h = np.zeros((1, num_hidden_states))
     # Vt_v = np.zeros((1, 1))
     # b_lambda = np.zeros((1, 1))
-    # Vh_alpha = np.zeros((2, num_hidden_states))
-    # Vv_alpha = np.zeros((2, 1))
+    # Vh_alpha = np.zeros((1, num_hidden_states))
+    # Vv_alpha = np.zeros((1, 1))
     # Va_b = np.zeros((100, num_hidden_states))
     # Va_s = np.zeros((100, num_hidden_states))
 
@@ -926,7 +969,8 @@ def make_default_trader_opts(seed):
     Ws_alpha = RS.randn(num_hidden_states, 1)
     Wn_b = RS.randn(num_hidden_states, 1)
     Wn_s = RS.randn(num_hidden_states, 1)
-    W_h = RS.randn(num_hidden_states, num_hidden_states) * 0.1 + np.diag(np.ones(num_hidden_states))  # Careful initialization
+    W_h = RS.randn(num_hidden_states, num_hidden_states) * 0.1 + np.diag(
+        np.ones(num_hidden_states))  # Careful initialization
     W_1 = RS.randn(num_hidden_states, num_hidden_states)
     W_2 = RS.randn(num_hidden_states, num_hidden_states)
     W_3 = RS.randn(num_hidden_states, num_hidden_states)
@@ -955,12 +999,12 @@ def make_default_trader_opts(seed):
     device_cpu = '/cpu:0'
     device_gpu = '/gpu:0'
     only_cpu = True
-    save_dir = SAVE_DIR+"/results_TF_RL/"
+    save_dir = SAVE_DIR + "/results_TF_RL/"
     # Expected: './tpprl.summary/train-{}/'.format(run)
-    summary_dir = save_dir+"/summary_dir/"
-    return wt, W_t, Wb_alpha, Ws_alpha, Wn_b, Wn_s, W_h, W_1, W_2, W_3, b_t, b_alpha, bn_b, bn_s,b_h, Vt_h, \
+    summary_dir = save_dir + "/summary_dir/"
+    return wt, W_t, Wb_alpha, Ws_alpha, Wn_b, Wn_s, W_h, W_1, W_2, W_3, b_t, b_alpha, bn_b, bn_s, b_h, Vt_h, \
            Vt_v, b_lambda, Vh_alpha, Vv_alpha, Va_b, Va_s, num_hidden_states, scope, batch_size, learning_rate, \
-           clip_norm, summary_dir, save_dir, decay_steps, decay_rate, momentum, device_cpu, device_gpu, only_cpu,\
+           clip_norm, summary_dir, save_dir, decay_steps, decay_rate, momentum, device_cpu, device_gpu, only_cpu, \
            max_events, T, start_time
 
 
@@ -1008,7 +1052,7 @@ def get_feed_dict(trader, mgr):
         trader.tf_batch_is_trade_feedback: batch_is_trade_feedback,
         trader.tf_batch_current_amt: batch_current_amount,
         trader.tf_batch_portfolio: batch_portfolio,
-        trader.tf_batch_v_deltas:batch_v_delta,
+        trader.tf_batch_v_deltas: batch_v_delta,
 
         trader.tf_batch_rewards: batch_rewards,
         trader.tf_batch_seq_len: batch_seq_len,
@@ -1020,6 +1064,7 @@ def get_feed_dict(trader, mgr):
 def run_scenario(trader, seed, T, start_time):
     raw_data = read_raw_data()
     wt = trader.sess.run(trader.tf_wt)
+    print("tf_wt={}".format(wt))
     W_t = trader.sess.run(trader.tf_W_t)
     Wb_alpha = trader.sess.run(trader.tf_Wb_alpha)
     Ws_alpha = trader.sess.run(trader.tf_Ws_alpha)
@@ -1070,7 +1115,8 @@ def test_run_scenario():
                                 W_1=W_1, W_2=W_2, W_3=W_3, b_t=b_t, b_alpha=b_alpha, bn_b=bn_b, bn_s=bn_s,
                                 b_h=b_h, Vt_h=Vt_h, Vt_v=Vt_v, b_lambda=b_lambda, Vh_alpha=Vh_alpha, Vv_alpha=Vv_alpha,
                                 Va_b=Va_b, Va_s=Va_s, num_hidden_states=num_hidden_states, sess=sess, scope=scope,
-                                batch_size=batch_size, learning_rate=learning_rate, clip_norm=clip_norm, summary_dir=summary_dir,
+                                batch_size=batch_size, learning_rate=learning_rate, clip_norm=clip_norm,
+                                summary_dir=summary_dir,
                                 save_dir=save_dir, decay_steps=decay_steps, decay_rate=decay_rate, momentum=momentum,
                                 device_cpu=device_cpu, device_gpu=device_gpu, only_cpu=only_cpu, max_events=max_events)
     trader.initialize()
@@ -1085,7 +1131,17 @@ def test_run_scenario():
     # rwd = list(feed_dict.keys())[8]
     # print(feed_dict[rwd])
     print('NN LL = {}'.format(mgr.agent.get_LL(end_time=T)))
+    print("TF LL_log_term_stack = {}".format(trader.sess.run([trader.LL_log_terms_stack], feed_dict=feed_dict)))
+    print("TF LL_int_term_stack = {}".format(trader.sess.run([trader.LL_int_terms_stack], feed_dict=feed_dict)))
+    print("TF LL_last_term_stack = {}".format(trader.sess.run([trader.LL_last_term_stack], feed_dict=feed_dict)))
+    print("TF LL_alpha_i_stack = {}".format(trader.sess.run([trader.LL_alpha_i_stack], feed_dict=feed_dict)))
+    print("TF LL_n_i_stack = {}".format(trader.sess.run([trader.LL_n_i_stack], feed_dict=feed_dict)))
     print('TF LL = {}'.format(trader.sess.run([trader.LL_stack], feed_dict=feed_dict)))
+    '''
+    (tf.reduce_sum(self.LL_log_terms_stack, axis=1) - 
+    tf.reduce_sum(self.LL_int_terms_stack, axis=1)) + 
+    self.LL_last_term_stack + self.LL_alpha_i_stack + self.LL_n_i_stack
+    '''
     # import json
     # with open(save_dir+"/tf_feed_dict.json","w") as outfile:
     #     json.dump(feed_dict, outfile)
