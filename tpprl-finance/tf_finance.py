@@ -1,4 +1,4 @@
-# TODO: Numpy_LL and TF_LL not same
+# TODO: resolving issue of wrong h_i
 # TODO: tf_n_i_LL has -inf
 import sys
 import pandas as pd
@@ -167,8 +167,9 @@ class RLStrategy(Strategy):
             self.Q *= (1 - self.cdf(event.t_i))
 
         # sample t_i
-        self.c1 = np.exp(
-            np.array(self.Vt_h).dot(self.h_i) + (self.Vt_v * (self.curr_price - self.last_price)) + self.b_lambda)
+        self.c1 = np.exp(np.array(self.Vt_h).dot(self.h_i) +
+                         (self.Vt_v * (self.curr_price - self.last_price)) +
+                         self.b_lambda)
         D = 1 - (self.wt / np.exp(self.c1)) * np.log((1 - self.u) / self.Q)
         a = np.squeeze((1 - self.u) / self.Q)
         assert a < 1
@@ -185,16 +186,16 @@ class RLStrategy(Strategy):
         u_theta_0 = self.c1 * np.exp(0.0)
         self.u_theta_t = self.c1 * np.squeeze(np.exp(self.wt * (self.curr_time - self.last_time)))
 
-        # calculate log likelihood
-        # self.loglikelihood += np.squeeze((self.u_theta_t - u_theta_0) / self.wt)  # prob of no event happening
+        # calculate log likelihood i.e. prob of no event happening
+        # LL_int_numpy = np.squeeze((self.u_theta_t - u_theta_0) / self.wt)
+        # print("{:.7f}".format(LL_int_numpy), end=",")
+        # self.loglikelihood += LL_int_numpy
         return self.curr_time
 
     def get_next_action_item(self, event):
         self.last_price = self.curr_price
         self.curr_price = event.v_curr
-        # update h_i i.e. h_next
-        self.h_i = np.tanh(np.array(self.W_h).dot(self.h_i) + np.array(self.W_1).dot(self.tau_i)
-                           + np.array(self.W_2).dot(self.b_i) + np.array(self.W_3).dot(self.eta_i) + self.b_h)
+
         # sample alpha_i
         prob = 1 / (1 + np.exp(
             -np.array(self.Vh_alpha).dot(self.h_i) - np.array(self.Vv_alpha).dot((self.curr_price - self.last_price))))
@@ -212,8 +213,8 @@ class RLStrategy(Strategy):
         assert self.current_amt > 0
         if alpha_i == 0:
             A = np.array(self.Va_b).dot(self.h_i)
-            if np.all([np.equal(ele, 0.0) for ele in A]):
-                A[0] = 1.0
+            # if np.all([np.equal(ele, 0.0) for ele in A]):
+            #     A[0] = 1.0
             # A = np.append(np.array([[1]]), A, axis=0)
 
             # calculate mask
@@ -245,8 +246,8 @@ class RLStrategy(Strategy):
             # assert self.current_amt > 0
         else:
             A = np.array(self.Va_b).dot(self.h_i)
-            if np.all([np.equal(ele, 0.0) for ele in A]):
-                A[0] = 1.0
+            # if np.all([np.equal(ele, 0.0) for ele in A]):
+            #     A[0] = 1.0
             # A[0] = 1.0
             # A = np.append(np.array([[1]]), A, axis=0)
             num_share_sell = int((self.owned_shares * event.v_curr) /
@@ -298,8 +299,21 @@ class RLStrategy(Strategy):
         self.current_amt -= a
         assert self.current_amt > 0
 
+        # update h_i i.e. h_next
+        np.set_printoptions(precision=6)
+        print(self.h_i)
+        self.h_i = np.tanh(np.array(self.W_h).dot(self.h_i) + np.array(self.W_1).dot(self.tau_i)
+                           + np.array(self.W_2).dot(self.b_i) + np.array(self.W_3).dot(self.eta_i) + self.b_h)
         # update log likelihood
-        self.loglikelihood += np.squeeze(np.log(self.u_theta_t))  # + np.log(prob_alpha[alpha_i]))# + np.log(prob_n[n_i]))
+        LL_log_numpy = np.squeeze(np.log(self.u_theta_t))
+        LL_alpha_i_numpy = np.log(prob_alpha[alpha_i])
+        LL_n_i_numpy = np.log(prob_n[n_i])
+        # print("{:.7f}".format(LL_log_numpy), end=",")
+        # print("LL_log_numpy={:.7f}".format(LL_log_numpy), end=",")
+        # print("LL_alpha_i_numpy={:.7f}".format(LL_alpha_i_numpy), end=",")
+        # print("LL_n_i_numpy={:.7f}".format(LL_n_i_numpy), end=",")
+        # print("\n")
+        self.loglikelihood += LL_log_numpy  # + np.log(prob_alpha[alpha_i]))# + np.log(prob_n[n_i]))
 
         return alpha_i, n_i
 
@@ -656,6 +670,7 @@ class ExpRecurrentTrader:
                                                                                       self.tf_batch_v_deltas[-1],
                                                                                       self.tf_batch_last_interval)
 
+                            # self.LL_stack = tf.reduce_sum(self.LL_int_terms_stack, axis=1)
                             self.LL_stack = tf.reduce_sum(self.LL_log_terms_stack, axis=1) #-\
                                              # tf.reduce_sum(self.LL_int_terms_stack, axis=1) #+ \
                                             # self.LL_last_term_stack #+ \
@@ -940,7 +955,7 @@ def make_default_trader_opts(seed):
     learning_rate = 0.01
     clip_norm = 1.0
     RS = np.random.RandomState(seed)
-    wt = RS.randn(1, 1)
+    wt = np.ones(shape=(1,1)) #RS.randn(1, 1)
     print("numpy_wt={}".format(wt))
     # W_t = np.zeros((num_hidden_states, 1))
     # Wb_alpha = np.zeros((num_hidden_states, 1))
@@ -969,18 +984,19 @@ def make_default_trader_opts(seed):
     Ws_alpha = RS.randn(num_hidden_states, 1)
     Wn_b = RS.randn(num_hidden_states, 1)
     Wn_s = RS.randn(num_hidden_states, 1)
-    W_h = RS.randn(num_hidden_states, num_hidden_states) * 0.1 + np.diag(
-        np.ones(num_hidden_states))  # Careful initialization
-    W_1 = RS.randn(num_hidden_states, num_hidden_states)
-    W_2 = RS.randn(num_hidden_states, num_hidden_states)
-    W_3 = RS.randn(num_hidden_states, num_hidden_states)
+    W_h = np.ones(shape=(num_hidden_states, num_hidden_states))
+    # W_h = RS.randn(num_hidden_states, num_hidden_states) * 0.1 + np.diag(
+    #     np.ones(num_hidden_states))  # Careful initialization
+    W_1 = np.zeros(shape=(num_hidden_states, num_hidden_states))  # RS.randn(num_hidden_states, num_hidden_states)
+    W_2 = np.zeros(shape=(num_hidden_states, num_hidden_states))  # RS.randn(num_hidden_states, num_hidden_states)
+    W_3 = np.zeros(shape=(num_hidden_states, num_hidden_states))  # RS.randn(num_hidden_states, num_hidden_states)
     b_t = RS.randn(num_hidden_states, 1)
     b_alpha = RS.randn(num_hidden_states, 1)
     bn_b = RS.randn(num_hidden_states, 1)
     bn_s = RS.randn(num_hidden_states, 1)
-    b_h = RS.randn(num_hidden_states, 1)
-    Vt_h = RS.randn(1, num_hidden_states)
-    Vt_v = RS.randn(1, 1)
+    b_h = np.zeros(shape=(num_hidden_states, 1))  #RS.randn(num_hidden_states, 1)
+    Vt_h = np.ones((1, num_hidden_states))# RS.randn(1, num_hidden_states)
+    Vt_v = np.zeros((1, 1)) # RS.randn(1, 1)
     b_lambda = RS.randn(1, 1)
     Vh_alpha = RS.randn(1, num_hidden_states)
     Vv_alpha = RS.randn(1, 1)
@@ -1130,6 +1146,7 @@ def test_run_scenario():
     feed_dict = get_feed_dict(trader=trader, mgr=mgr)
     # rwd = list(feed_dict.keys())[8]
     # print(feed_dict[rwd])
+    print("TF hidden states = {}".format(trader.sess.run([trader.h_states_stack], feed_dict=feed_dict)))
     print('NN LL = {}'.format(mgr.agent.get_LL(end_time=T)))
     print("TF LL_log_term_stack = {}".format(trader.sess.run([trader.LL_log_terms_stack], feed_dict=feed_dict)))
     print("TF LL_int_term_stack = {}".format(trader.sess.run([trader.LL_int_terms_stack], feed_dict=feed_dict)))

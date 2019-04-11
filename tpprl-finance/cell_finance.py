@@ -91,6 +91,7 @@ class TPPRExpMarkedCellStacked_finance(tf.contrib.rnn.RNNCell):
                 false_fn=encode_sell_n_i,
                 name="encode_n_i_eta_i"
             )
+
             hnext = tf.nn.tanh(
                 tf.einsum('aij,ai->aj', self.tf_W_h, h_prev) +
                 tf.einsum('aij,ai->aj', self.tf_W_1, tau_i) +
@@ -113,7 +114,10 @@ class TPPRExpMarkedCellStacked_finance(tf.contrib.rnn.RNNCell):
         u_theta_0 = tf.squeeze(self.u_theta(h=h_prev, t_delta=t_0, v_delta=v_delta, name='u_theta_0'))
 
         # LL of t_i and delta calculation
-        LL_log = tf.reshape(tf.log(u_theta), shape=[1], name="LL_log_reshape")
+        LL_log = tf.cond(pred=tf.equal(val_is_trade_feedback, 1),
+                         true_fn=lambda :tf.reshape(tf.log(u_theta), shape=[1], name="LL_log_reshape"),
+                         false_fn=lambda :tf.zeros(shape=[1]))
+        # LL_log = tf.reshape(tf.log(u_theta), shape=[1], name="LL_log_reshape")
         LL_int = tf.reshape((u_theta - u_theta_0) / tf.squeeze(self.tf_wt), shape=[1], name="LL_int_reshape")
         loss = tf.reshape((tf.square(u_theta) - tf.square(u_theta_0)) / (2 * tf.squeeze(self.tf_wt)), shape=[1, 1],
                           name="loss_reshape")
@@ -136,10 +140,10 @@ class TPPRExpMarkedCellStacked_finance(tf.contrib.rnn.RNNCell):
         def prob_n_buy():
             A = tf.einsum('aij,aj->ai', self.tf_Va_b, h_prev, name='A_buy')
             # if all values are zero, assign 1.0 to prob of buying zero shares
-            is_all_zero = tf.reduce_sum(A)
-            buy_zero = tf.cond(pred=tf.equal(is_all_zero, 0.0), true_fn=lambda: True, false_fn=lambda: False)
-            if buy_zero:
-                A = tf.scatter_nd(indices=[0], updates=[1.0], shape=A)
+            # is_all_zero = tf.reduce_sum(A)
+            # A = tf.cond(pred=tf.equal(is_all_zero, 0.0),
+            #             true_fn=lambda: tf.scatter_update(ref = A, indices=[0], updates=[1.0]),
+            #             false_fn=lambda: A)
 
             max_share_buy = tf.math.minimum(MAX_SHARE, tf.cast(
                 tf.math.floor(
