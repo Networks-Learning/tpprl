@@ -3,6 +3,7 @@
 import sys
 import pandas as pd
 import numpy as np
+np.set_printoptions(precision=6)
 import os
 import tensorflow as tf
 
@@ -168,9 +169,12 @@ class RLStrategy(Strategy):
 
         # sample t_i
         v_delta = (self.curr_price - self.last_price)
-        self.c1 = np.exp(np.array(self.Vt_h).dot(self.h_i) +
-                         (self.Vt_v * v_delta) +
-                         self.b_lambda)
+        vth_val = np.array(self.Vt_h).dot(self.h_i)
+        vtv_val = (self.Vt_v * v_delta)
+        bias = self.b_lambda
+        self.c1 = np.exp(vth_val +
+                         vtv_val+
+                         bias)
         D = 1 - (self.wt / self.c1) * np.log((1 - self.u) / self.Q)
         a = np.squeeze((1 - self.u) / self.Q)
         assert a < 1
@@ -180,20 +184,18 @@ class RLStrategy(Strategy):
         new_t_i = self.last_time + (1 / self.wt) * np.log(D)
         new_t_i = np.asarray(new_t_i).squeeze()
         self.curr_time = new_t_i
-
         assert self.curr_time >= self.last_time
-
-        # update the log likelihood
-        u_theta_0 = self.c1 * np.exp(0.0)
-        self.u_theta_t = self.c1 * np.squeeze(np.exp(self.wt * (self.curr_time - self.last_time)))
-
-        # calculate log likelihood i.e. prob of no event happening
-        LL_int_numpy = np.squeeze((self.u_theta_t - u_theta_0) / self.wt)
-        print("{:.7f}".format(LL_int_numpy), end=",")
-        self.loglikelihood += LL_int_numpy
         # np.set_printoptions(precision=6)
         # print(self.h_i)
         return self.curr_time
+
+    def calculate_tickfb_LL_int(self, event):
+        t_0 = 0.0
+        u_theta_0 = self.c1 * np.exp(t_0)
+        self.u_theta_t = self.c1 * np.squeeze(np.exp(self.wt * (event.t_i - self.last_time)))
+        # calculate log likelihood i.e. prob of no event happening
+        LL_int_numpy = np.squeeze((self.u_theta_t - u_theta_0) / self.wt)
+        self.loglikelihood -= LL_int_numpy
 
     def get_next_action_item(self, event):
         self.last_price = self.curr_price
@@ -309,9 +311,19 @@ class RLStrategy(Strategy):
         self.h_i = np.tanh(np.array(self.W_h).dot(self.h_i) + np.array(self.W_1).dot(self.tau_i)
                            + np.array(self.W_2).dot(self.b_i) + np.array(self.W_3).dot(self.eta_i) + self.b_h)
         # update log likelihood
+        self.u_theta_t = self.c1 * np.squeeze(np.exp(self.wt * (self.curr_time - self.last_time)))
+
+        t_0 = 0.0
+        u_theta_0 = self.c1 * np.exp(t_0)
+        # calculate log likelihood i.e. prob of no event happening
+        LL_int_numpy = np.squeeze((self.u_theta_t - u_theta_0) / self.wt)
+        self.loglikelihood -= LL_int_numpy
+        print("LL_int numpy:{:.7f}".format(LL_int_numpy))
+        print("t_delta:", (self.curr_time - self.last_time))
+        self.loglikelihood -= LL_int_numpy
         LL_log_numpy = np.squeeze(np.log(self.u_theta_t))
-        LL_alpha_i_numpy = np.log(prob_alpha[alpha_i])
-        LL_n_i_numpy = np.log(prob_n[n_i])
+        # LL_alpha_i_numpy = np.log(prob_alpha[alpha_i])
+        # LL_n_i_numpy = np.log(prob_n[n_i])
         # print("{:.7f}".format(LL_log_numpy), end=",")
         # print("LL_log_numpy={:.7f}".format(LL_log_numpy), end=",")
         # print("LL_alpha_i_numpy={:.7f}".format(LL_alpha_i_numpy), end=",")
@@ -396,6 +408,7 @@ class Environment:
                     current_event = TickFeedback(t_i=next_tick.datetime, v_curr=next_tick.price,
                                                  event_curr_amt=self.agent.current_amt,
                                                  portfolio=self.agent.owned_shares)
+                    self.agent.calculate_tickfb_LL_int(current_event)
                     # print("reading market value at time {}".format(current_event.t_i))
                     # break
                     # update the current time to read time

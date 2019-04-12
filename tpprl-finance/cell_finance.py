@@ -47,13 +47,28 @@ class TPPRExpMarkedCellStacked_finance(tf.contrib.rnn.RNNCell):
         self.tf_Va_s = Va_s
 
     def u_theta(self, h, t_delta, v_delta, name):
-        return tf.exp(
-            tf.einsum('aij,aj->ai', self.tf_Vt_h, h, name='Vt_h__h') +
-            tf.einsum('aij,aj->ai', self.tf_Vt_v, v_delta, name="Vt_v__v_delta") +
-            tf.einsum('aij,ai->aj', self.tf_wt, t_delta, name="wt__t_delta") +  # TODO
-            self.tf_b_lambda,
-            name=name
-        )
+        vt_h_val = tf.einsum('aij,aj->ai', self.tf_Vt_h, h, name='Vt_h__h')
+        vtv_val = tf.einsum('aij,aj->ai', self.tf_Vt_v, v_delta, name="Vt_v__v_delta")
+        wt_t_delta = tf.einsum('aij,ai->aj', self.tf_wt, t_delta, name="wt__t_delta")
+        bias = self.tf_b_lambda
+        c1 = tf.exp(vt_h_val + vtv_val + bias)
+        opt = []
+        opt.append(tf.print('vt_h_val:', vt_h_val, '\n',
+                            'vtv_val:', vtv_val, '\n',
+                            'bias:', bias, '\n'
+                            'c1:', c1, '\n'
+                            'wt_t_delta:', wt_t_delta,'\n',
+                            't_delta:', t_delta,
+                            '============================='))
+        with tf.control_dependencies(opt):
+            val = tf.exp(
+                vt_h_val +
+                vtv_val +
+                wt_t_delta +  # TODO
+                bias,
+                name=name
+            )
+        return val
 
     def __call__(self, inp, h_prev):
         # TODO: Event type \in {TradeFB, ReadFB}
@@ -133,9 +148,9 @@ class TPPRExpMarkedCellStacked_finance(tf.contrib.rnn.RNNCell):
             name="is_h_next_updated"
         )
 
-        u_theta = tf.squeeze(self.u_theta(h=h_prev, t_delta=t_delta, v_delta=v_delta, name='u_theta'))
         t_0 = tf.zeros(name='zero_time', shape=(inf_batch_size, 1), dtype=self.tf_dtype)
         u_theta_0 = tf.squeeze(self.u_theta(h=h_prev, t_delta=t_0, v_delta=v_delta, name='u_theta_0'))
+        u_theta = tf.squeeze(self.u_theta(h=h_prev, t_delta=t_delta, v_delta=v_delta, name='u_theta'))
 
         # LL of t_i and delta calculation
         LL_log = tf.cond(pred=tf.equal(val_is_trade_feedback, 1),
