@@ -10,8 +10,8 @@ import tensorflow as tf
 from util_finance import _now, variable_summaries
 from cell_finance import TPPRExpMarkedCellStacked_finance
 
-SAVE_DIR = "/NL/tpprl-result/work/rl-finance/"
-# SAVE_DIR = "/home/supriya/MY_HOME/MPI-SWS/dataset"
+# SAVE_DIR = "/NL/tpprl-result/work/rl-finance/"
+SAVE_DIR = "/home/supriya/MY_HOME/MPI-SWS/dataset"
 HIDDEN_LAYER_DIM = 8
 MAX_AMT = 1000.0
 MAX_SHARE = 100
@@ -151,9 +151,14 @@ class RLStrategy(Strategy):
         self.last_price = None
         self.curr_price = None
         self.loglikelihood = 0
+        self.amount_before_trade = None
         print("using RL strategy")
 
     def get_next_action_time(self, event):
+        # if no trade event occurred before, then amount before trade is same as max amount
+        if self.amount_before_trade is None:
+            self.amount_before_trade = MAX_AMT
+
         # if this method is called after buying/selling action, then sample new u
         if self.curr_price is None:
             # This is the first event
@@ -185,21 +190,22 @@ class RLStrategy(Strategy):
         new_t_i = np.asarray(new_t_i).squeeze()
         self.curr_time = new_t_i
         assert self.curr_time >= self.last_time
-        # np.set_printoptions(precision=6)
-        # print(self.h_i)
+
         return self.curr_time
 
     def calculate_tickfb_LL_int(self, event):
+        # calculate log likelihood i.e. prob of no event happening between last event and this read event
         t_0 = 0.0
         u_theta_0 = self.c1 * np.exp(t_0)
         self.u_theta_t = self.c1 * np.squeeze(np.exp(self.wt * (event.t_i - self.last_time)))
-        # calculate log likelihood i.e. prob of no event happening
         LL_int_numpy = np.squeeze((self.u_theta_t - u_theta_0) / self.wt)
         self.loglikelihood -= LL_int_numpy
 
     def get_next_action_item(self, event):
         self.last_price = self.curr_price
         self.curr_price = event.v_curr
+
+        self.amount_before_trade = self.current_amt
 
         # sample alpha_i
         prob = 1 / (1 + np.exp(
@@ -242,13 +248,17 @@ class RLStrategy(Strategy):
                 reduce_sum = EPSILON
             prob_n = masked_A / reduce_sum
             prob_n = np.squeeze(prob_n)
-
+            # print("max_share_buy: ", max_share_buy)
+            # print("reduce_sum: ", reduce_sum)
+            # print("prob_n: ", prob_n)
+            # print("current_amt: ", self.current_amt)
+            # print("v_curr: ", event.v_curr)
             # sample
             n_i = self.RS.choice(np.arange(MAX_SHARE), p=np.squeeze(prob_n))
-            # self.owned_shares += n_i
-            # a = event.v_curr * n_i
-            # self.current_amt -= a
-            # assert self.current_amt > 0
+            # print("n_i: ", n_i)
+            # print("val: ", np.log(prob_n[n_i]))
+            # print()
+
         else:
             A = np.array(self.Va_s).dot(self.h_i)
             # if np.all([np.equal(ele, 0.0) for ele in A]):
@@ -273,12 +283,14 @@ class RLStrategy(Strategy):
                 reduce_sum = EPSILON
             prob_n = masked_A / reduce_sum
             prob_n = np.squeeze(prob_n)
-
+            # print("max_share_sell: ", max_share_sell)
+            # print("reduce_sum: ", reduce_sum)
+            # print("prob_n: ", prob_n)
             # sample
             n_i = self.RS.choice(np.arange(MAX_SHARE), p=np.squeeze(prob_n))
-            # self.owned_shares -= n_i
-            # self.current_amt += event.v_curr * n_i
-            # assert self.current_amt > 0
+            # print("n_i: ", n_i)
+            # print("val: ", np.log(prob_n[n_i]))
+            # print()
 
         # encode event details
         t_delta = (self.curr_time - self.last_time)
@@ -313,23 +325,18 @@ class RLStrategy(Strategy):
         # update log likelihood
         self.u_theta_t = self.c1 * np.squeeze(np.exp(self.wt * (self.curr_time - self.last_time)))
 
+        # calculate log likelihood i.e. prob of no event happening between last event and this trade event
         t_0 = 0.0
         u_theta_0 = self.c1 * np.exp(t_0)
-        # calculate log likelihood i.e. prob of no event happening
         LL_int_numpy = np.squeeze((self.u_theta_t - u_theta_0) / self.wt)
         self.loglikelihood -= LL_int_numpy
-        print("LL_int numpy:{:.7f}".format(LL_int_numpy))
-        print("t_delta:", (self.curr_time - self.last_time))
-        self.loglikelihood -= LL_int_numpy
+
+        # Log likelihood of happening this event
         LL_log_numpy = np.squeeze(np.log(self.u_theta_t))
-        # LL_alpha_i_numpy = np.log(prob_alpha[alpha_i])
-        # LL_n_i_numpy = np.log(prob_n[n_i])
-        # print("{:.7f}".format(LL_log_numpy), end=",")
-        # print("LL_log_numpy={:.7f}".format(LL_log_numpy), end=",")
-        # print("LL_alpha_i_numpy={:.7f}".format(LL_alpha_i_numpy), end=",")
-        # print("LL_n_i_numpy={:.7f}".format(LL_n_i_numpy), end=",")
-        # print("\n")
-        self.loglikelihood += LL_log_numpy  # + np.log(prob_alpha[alpha_i]))# + np.log(prob_n[n_i]))
+        LL_alpha_i_numpy = np.log(prob_alpha[alpha_i])
+        LL_n_i_numpy = np.log(prob_n[n_i])
+
+        self.loglikelihood +=  LL_log_numpy + LL_alpha_i_numpy + LL_n_i_numpy
 
         return alpha_i, n_i
 
@@ -342,11 +349,14 @@ class RLStrategy(Strategy):
 
     def get_LL(self, end_time):
         # add LL for last interval
-        # self.c1 = np.exp(
-        #     np.array(self.Vt_h).dot(self.h_i) + (self.Vt_v * (self.curr_price - self.last_price)) + self.b_lambda)
-        # u_theta_0 = self.c1 * np.exp(0.0)
-        # self.u_theta_t = self.c1 * np.squeeze(np.exp(self.wt * (end_time - self.last_time)))
-        # self.loglikelihood += np.squeeze((self.u_theta_t - u_theta_0) / self.wt)
+        self.c1 = np.exp(
+            np.array(self.Vt_h).dot(self.h_i) + (self.Vt_v * (self.curr_price - self.last_price)) + self.b_lambda)
+        u_theta_0 = self.c1 * np.exp(0.0)
+        self.u_theta_t = self.c1 * np.squeeze(np.exp(self.wt * (end_time - self.last_time)))
+        LL_last_term_numpy = np.squeeze((self.u_theta_t - u_theta_0) / self.wt)
+        # print("t_delta: ",(end_time - self.last_time))
+        # print("LL_last_term_numpy: ", LL_last_term_numpy)
+        self.loglikelihood += LL_last_term_numpy
         return self.loglikelihood
 
 
@@ -391,13 +401,15 @@ class Environment:
         self.list_current_amount.append([event.event_curr_amt])
         self.list_portfolio.append([event.portfolio])
         self.list_v_delta.append([event.v_curr - self.agent.last_price])
-        print()
+        # print()
 
     def simulator(self):
         row_iterator = self.tick_data.iterrows()
         first_tick = next(row_iterator)[1]
         current_event = TickFeedback(t_i=first_tick.datetime, v_curr=first_tick.price,
-                                     event_curr_amt=self.agent.current_amt, portfolio=self.agent.owned_shares)
+                                     event_curr_amt=self.agent.amount_before_trade, portfolio=self.agent.owned_shares)
+        # first read event is not saved
+        # self.apply_event(current_event)
         print("trading..")
 
         for (_idx, next_tick) in row_iterator:
@@ -406,7 +418,7 @@ class Environment:
                 # check if there is enough amount to buy at least one share at current price
                 if next_agent_action_time > next_tick.datetime:
                     current_event = TickFeedback(t_i=next_tick.datetime, v_curr=next_tick.price,
-                                                 event_curr_amt=self.agent.current_amt,
+                                                 event_curr_amt=self.agent.amount_before_trade,
                                                  portfolio=self.agent.owned_shares)
                     self.agent.calculate_tickfb_LL_int(current_event)
                     # print("reading market value at time {}".format(current_event.t_i))
@@ -421,7 +433,7 @@ class Environment:
                     trade_price = current_event.v_curr
                     alpha_i, n_i = self.agent.get_next_action_item(current_event)
                     current_event = TradeFeedback(t_i=next_agent_action_time, v_curr=trade_price,
-                                                  alpha_i=alpha_i, n_i=n_i, event_curr_amt=self.agent.current_amt,
+                                                  alpha_i=alpha_i, n_i=n_i, event_curr_amt=self.agent.amount_before_trade,
                                                   portfolio=self.agent.owned_shares)
                     self.agent.update_owned_shares(current_event)
                     # update the current time to trade time
@@ -464,8 +476,8 @@ class ExpRecurrentTrader:
                  device_cpu, device_gpu, only_cpu, max_events):
         self.summary_dir = summary_dir
         self.save_dir = save_dir
-        self.tf_dtype = tf.float32
-        self.np_dtype = np.float32
+        self.tf_dtype = tf.float64
+        self.np_dtype = np.float64
 
         self.learning_rate = learning_rate
         self.decay_rate = decay_rate
@@ -490,33 +502,33 @@ class ExpRecurrentTrader:
                 with tf.variable_scope('hidden_state'):
                     with tf.device(var_device):
                         self.tf_W_t = tf.get_variable(name='W_t', shape=W_t.shape,
-                                                      initializer=tf.constant_initializer(W_t))
+                                                      initializer=tf.constant_initializer(W_t), dtype=self.tf_dtype)
                         self.tf_Wb_alpha = tf.get_variable(name='Wb_alpha', shape=Wb_alpha.shape,
-                                                           initializer=tf.constant_initializer(Wb_alpha))
+                                                           initializer=tf.constant_initializer(Wb_alpha), dtype=self.tf_dtype)
                         self.tf_Ws_alpha = tf.get_variable(name='Ws_alpha', shape=Ws_alpha.shape,
-                                                           initializer=tf.constant_initializer(Ws_alpha))
+                                                           initializer=tf.constant_initializer(Ws_alpha), dtype=self.tf_dtype)
                         self.tf_Wn_b = tf.get_variable(name='Wn_b', shape=Wn_b.shape,
-                                                       initializer=tf.constant_initializer(Wn_b))
+                                                       initializer=tf.constant_initializer(Wn_b), dtype=self.tf_dtype)
                         self.tf_Wn_s = tf.get_variable(name='Wn_s', shape=Wn_s.shape,
-                                                       initializer=tf.constant_initializer(Wn_s))
+                                                       initializer=tf.constant_initializer(Wn_s), dtype=self.tf_dtype)
                         self.tf_W_h = tf.get_variable(name='W_h', shape=W_h.shape,
-                                                      initializer=tf.constant_initializer(W_h))
+                                                      initializer=tf.constant_initializer(W_h), dtype=self.tf_dtype)
                         self.tf_W_1 = tf.get_variable(name='W_1', shape=W_1.shape,
-                                                      initializer=tf.constant_initializer(W_1))
+                                                      initializer=tf.constant_initializer(W_1), dtype=self.tf_dtype)
                         self.tf_W_2 = tf.get_variable(name='W_2', shape=W_2.shape,
-                                                      initializer=tf.constant_initializer(W_2))
+                                                      initializer=tf.constant_initializer(W_2), dtype=self.tf_dtype)
                         self.tf_W_3 = tf.get_variable(name='W_3', shape=W_3.shape,
-                                                      initializer=tf.constant_initializer(W_3))
+                                                      initializer=tf.constant_initializer(W_3), dtype=self.tf_dtype)
                         self.tf_b_t = tf.get_variable(name='b_t', shape=b_t.shape,
-                                                      initializer=tf.constant_initializer(b_t))
+                                                      initializer=tf.constant_initializer(b_t), dtype=self.tf_dtype)
                         self.tf_b_alpha = tf.get_variable(name='b_alpha', shape=b_alpha.shape,
-                                                          initializer=tf.constant_initializer(b_alpha))
+                                                          initializer=tf.constant_initializer(b_alpha), dtype=self.tf_dtype)
                         self.tf_bn_b = tf.get_variable(name='bn_b', shape=bn_b.shape,
-                                                       initializer=tf.constant_initializer(bn_b))
+                                                       initializer=tf.constant_initializer(bn_b), dtype=self.tf_dtype)
                         self.tf_bn_s = tf.get_variable(name='bn_s', shape=bn_s.shape,
-                                                       initializer=tf.constant_initializer(bn_s))
+                                                       initializer=tf.constant_initializer(bn_s), dtype=self.tf_dtype)
                         self.tf_b_h = tf.get_variable(name='b_h', shape=b_h.shape,
-                                                      initializer=tf.constant_initializer(b_h))
+                                                      initializer=tf.constant_initializer(b_h), dtype=self.tf_dtype)
 
                         # Needed to calculate the hidden state for one step.
                         self.tf_h_i = tf.get_variable(name='h_i', initializer=tf.zeros((self.num_hidden_states, 1),
@@ -539,21 +551,21 @@ class ExpRecurrentTrader:
                 with tf.variable_scope('output'):
                     with tf.device(var_device):
                         self.tf_wt = tf.get_variable(name='wt', shape=wt.shape,
-                                                     initializer=tf.constant_initializer(wt))
+                                                     initializer=tf.constant_initializer(wt),dtype=self.tf_dtype)
                         self.tf_Vt_h = tf.get_variable(name='Vt_h', shape=Vt_h.shape,
-                                                       initializer=tf.constant_initializer(Vt_h))
+                                                       initializer=tf.constant_initializer(Vt_h),dtype=self.tf_dtype)
                         self.tf_Vt_v = tf.get_variable(name='Vt_v', shape=Vt_v.shape,
-                                                       initializer=tf.constant_initializer(Vt_v))
+                                                       initializer=tf.constant_initializer(Vt_v),dtype=self.tf_dtype)
                         self.tf_b_lambda = tf.get_variable(name='b_lambda', shape=b_lambda.shape,
-                                                           initializer=tf.constant_initializer(b_lambda))
+                                                           initializer=tf.constant_initializer(b_lambda),dtype=self.tf_dtype)
                         self.tf_Vh_alpha = tf.get_variable(name='Vh_alpha', shape=Vh_alpha.shape,
-                                                           initializer=tf.constant_initializer(Vh_alpha))
+                                                           initializer=tf.constant_initializer(Vh_alpha),dtype=self.tf_dtype)
                         self.tf_Vv_alpha = tf.get_variable(name='Vv_alpha', shape=Vv_alpha.shape,
-                                                           initializer=tf.constant_initializer(Vv_alpha))
+                                                           initializer=tf.constant_initializer(Vv_alpha),dtype=self.tf_dtype)
                         self.tf_Va_b = tf.get_variable(name='Va_b', shape=Va_b.shape,
-                                                       initializer=tf.constant_initializer(Va_b))
+                                                       initializer=tf.constant_initializer(Va_b),dtype=self.tf_dtype)
                         self.tf_Va_s = tf.get_variable(name='Va_s', shape=Va_s.shape,
-                                                       initializer=tf.constant_initializer(Va_s))
+                                                       initializer=tf.constant_initializer(Va_s),dtype=self.tf_dtype)
 
                 # Create a large dynamic_rnn kind of network which can calculate
                 # the gradients for a given batch of simulations.
@@ -688,12 +700,12 @@ class ExpRecurrentTrader:
                                                                                       self.tf_batch_v_deltas[-1],
                                                                                       self.tf_batch_last_interval)
 
-                            # self.LL_stack = tf.reduce_sum(self.LL_int_terms_stack, axis=1)
-                            self.LL_stack = tf.reduce_sum(self.LL_log_terms_stack, axis=1) -\
-                                             tf.reduce_sum(self.LL_int_terms_stack, axis=1) #+ \
-                                            # self.LL_last_term_stack #+ \
-                                            # tf.reduce_sum(self.LL_alpha_i_stack, axis=1)  # + \
-                            # tf.reduce_sum(self.LL_n_i_stack, axis=1)
+                            # self.LL_stack = self.LL_last_term_stack
+                            self.LL_stack = (tf.reduce_sum(self.LL_log_terms_stack, axis=1)
+                                            - tf.reduce_sum(self.LL_int_terms_stack, axis=1)
+                                            + tf.reduce_sum(self.LL_alpha_i_stack, axis=1)
+                                            + tf.reduce_sum(self.LL_n_i_stack, axis=1)
+                                            + self.LL_last_term_stack)
 
                             tf_seq_len = tf.squeeze(self.tf_batch_seq_len, axis=-1)
                             self.loss_stack = (tf.reduce_sum(self.loss_terms_stack, axis=1) +
@@ -957,8 +969,8 @@ def read_raw_data():
     # folder = "/home/supriya/MY_HOME/MPI-SWS/dataset"
     # folder = "/NL/tpprl-result/work/rl-finance/"
     # raw = pd.read_csv(folder + "/hourly_data/0_hour.csv")  # header names=['datetime', 'price'])
-    raw = pd.read_csv(SAVE_DIR + "/daily_data/0_day.csv")
-    # raw = pd.read_csv(SAVE_DIR + "/0_day.csv")
+    # raw = pd.read_csv(SAVE_DIR + "/daily_data/0_day.csv")
+    raw = pd.read_csv(SAVE_DIR + "/0_day.csv")
     df = pd.DataFrame(raw)
     return df
 
@@ -975,7 +987,6 @@ def make_default_trader_opts(seed):
     RS = np.random.RandomState(seed)
     wt = RS.randn(1, 1)
     # wt = np.ones([1,1])
-    print("numpy_wt={}".format(wt))
     # W_t = np.zeros((num_hidden_states, 1))
     # Wb_alpha = np.zeros((num_hidden_states, 1))
     # Ws_alpha = np.zeros((num_hidden_states, 1))
@@ -1027,7 +1038,8 @@ def make_default_trader_opts(seed):
     momentum = 0.9
     max_events = 1
     batch_size = 1
-    T = 1254130210  # 1254133800
+    T = 1254153600  #0_day end time=1254153600, 0_hour end time=1254133800
+
 
     device_cpu = '/cpu:0'
     device_gpu = '/gpu:0'
@@ -1097,7 +1109,6 @@ def get_feed_dict(trader, mgr):
 def run_scenario(trader, seed, T, start_time):
     raw_data = read_raw_data()
     wt = trader.sess.run(trader.tf_wt)
-    print("tf_wt={}".format(wt))
     W_t = trader.sess.run(trader.tf_W_t)
     Wb_alpha = trader.sess.run(trader.tf_Wb_alpha)
     Ws_alpha = trader.sess.run(trader.tf_Ws_alpha)
@@ -1164,12 +1175,13 @@ def test_run_scenario():
     # rwd = list(feed_dict.keys())[8]
     # print(feed_dict[rwd])
     # print("TF hidden states = {}".format(trader.sess.run([trader.h_states_stack], feed_dict=feed_dict)))
-    print('NN LL = {}'.format(mgr.agent.get_LL(end_time=T)))
+
     print("TF LL_log_term_stack = {}".format(trader.sess.run([trader.LL_log_terms_stack], feed_dict=feed_dict)))
     print("TF LL_int_term_stack = {}".format(trader.sess.run([trader.LL_int_terms_stack], feed_dict=feed_dict)))
     print("TF LL_last_term_stack = {}".format(trader.sess.run([trader.LL_last_term_stack], feed_dict=feed_dict)))
     print("TF LL_alpha_i_stack = {}".format(trader.sess.run([trader.LL_alpha_i_stack], feed_dict=feed_dict)))
     print("TF LL_n_i_stack = {}".format(trader.sess.run([trader.LL_n_i_stack], feed_dict=feed_dict)))
+    print('NN LL = {}'.format(mgr.agent.get_LL(end_time=T)))
     print('TF LL = {}'.format(trader.sess.run([trader.LL_stack], feed_dict=feed_dict)))
     '''
     (tf.reduce_sum(self.LL_log_terms_stack, axis=1) - 
