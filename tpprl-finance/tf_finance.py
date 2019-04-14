@@ -962,20 +962,21 @@ class ExpRecurrentTrader:
             self.saver.save(self.sess, chkpt_file, global_step=self.global_step, )
 
 
-def read_raw_data():
+def read_raw_data(seed):
     """ read raw_data """
     print("reading raw data")
-    # folder = "/home/psupriya/MY_HOME/tpprl_finance/dataset/"
-    # folder = "/home/supriya/MY_HOME/MPI-SWS/dataset"
-    # folder = "/NL/tpprl-result/work/rl-finance/"
-    # raw = pd.read_csv(folder + "/hourly_data/0_hour.csv")  # header names=['datetime', 'price'])
+    # TODO: select unique trade data file based on seed
+    # total_num_files = 1 #TODO update this number as per the available data of trade days
+    # RS = np.random.RandomState(seed=seed)
+    # file_num = RS.choice(a=total_num_files, size=1) # draw sample of size 1 with uniform distribution
+    # raw = pd.read_csv(SAVE_DIR + "/daily_data/{}_day.csv".format(file_num)
     # raw = pd.read_csv(SAVE_DIR + "/daily_data/0_day.csv")
     raw = pd.read_csv(SAVE_DIR + "/0_day.csv")
     df = pd.DataFrame(raw)
     return df
 
 
-def make_default_trader_opts(seed):
+def make_default_trader_opts(seed=42):
     """Make default option set."""
     start_time = 1254130200
     scope = None
@@ -1037,7 +1038,7 @@ def make_default_trader_opts(seed):
     # to be seen.
     momentum = 0.9
     max_events = 1
-    batch_size = 1
+    batch_size = 2
     T = 1254153600  #0_day end time=1254153600, 0_hour end time=1254133800
 
 
@@ -1055,19 +1056,18 @@ def make_default_trader_opts(seed):
 
 def get_feed_dict(trader, mgr):
     """Produce a feed_dict for the given list of scenarios."""
-    batch_size = 1
-    # TODO get maximum events = TradeFB + ReadFB events.
-    max_events = len(mgr.list_t_delta)
+    batch_size = len(mgr)
+    max_events = max(m.get_num_events() for m in mgr)
     # TODO modify following when multiple portfolios are considered
     types_of_portfolio = 1
 
     full_shape = (batch_size, max_events)
     portfolio_shape = (batch_size, max_events, types_of_portfolio)
-    batch_rewards = np.asarray([mgr.reward_fn()])[:, np.newaxis]
+    batch_rewards = np.asarray([m.reward_fn() for m in mgr])[:, np.newaxis]
 
-    batch_last_interval = np.reshape(np.asarray([mgr.get_last_interval()], dtype=float), newshape=(batch_size, 1))
+    batch_last_interval = np.reshape(np.asarray([m.get_last_interval() for m in mgr], dtype=float), newshape=(batch_size, 1))
 
-    batch_seq_len = np.asarray([mgr.get_num_events()], dtype=float)[:, np.newaxis]
+    batch_seq_len = np.asarray([m.get_num_events() for m in mgr], dtype=float)[:, np.newaxis]
 
     batch_t_delta = np.zeros(shape=full_shape, dtype=float)
     batch_alpha_i = np.zeros(shape=full_shape, dtype=int)
@@ -1078,16 +1078,18 @@ def get_feed_dict(trader, mgr):
     batch_portfolio = np.zeros(shape=portfolio_shape, dtype=float)
     batch_init_h = np.zeros(shape=(batch_size, trader.num_hidden_states), dtype=float)
     batch_v_delta = np.zeros(shape=portfolio_shape, dtype=float)  # TODO storing v_delta
-    batch_len = int(batch_seq_len)
 
-    batch_t_delta[0:batch_len] = mgr.list_t_delta
-    batch_alpha_i[0:batch_len] = mgr.list_alpha_i
-    batch_n_i[0:batch_len] = mgr.list_n_i
-    batch_v_curr[0:batch_len] = mgr.list_v_curr
-    batch_is_trade_feedback[0:batch_len] = mgr.list_is_trade_feedback
-    batch_current_amount[0:batch_len] = mgr.list_current_amount
-    batch_portfolio[0:batch_len] = mgr.list_portfolio
-    batch_v_delta[0:batch_len] = mgr.list_v_delta
+    for idx, m in enumerate(mgr):
+        batch_len = int(batch_seq_len[idx])
+
+        batch_t_delta[idx, 0:batch_len] = m.list_t_delta
+        batch_alpha_i[idx, 0:batch_len] = m.list_alpha_i
+        batch_n_i[idx, 0:batch_len] = m.list_n_i
+        batch_v_curr[idx, 0:batch_len] = m.list_v_curr
+        batch_is_trade_feedback[idx, 0:batch_len] = m.list_is_trade_feedback
+        batch_current_amount[idx, 0:batch_len] = m.list_current_amount
+        batch_portfolio[idx, 0:batch_len] = m.list_portfolio
+        batch_v_delta[idx, 0:batch_len] = m.list_v_delta
 
     return {
         trader.tf_batch_t_deltas: batch_t_delta,
@@ -1107,7 +1109,8 @@ def get_feed_dict(trader, mgr):
 
 
 def run_scenario(trader, seed, T, start_time):
-    raw_data = read_raw_data()
+    # use seed to select the trade data file
+    raw_data = read_raw_data(seed=seed)
     wt = trader.sess.run(trader.tf_wt)
     W_t = trader.sess.run(trader.tf_W_t)
     Wb_alpha = trader.sess.run(trader.tf_Wb_alpha)
@@ -1194,5 +1197,45 @@ def test_run_scenario():
     # print("feed_dict saved as json at location:{}".format(save_dir+"/tf_feed_dict.json"))
 
 
+def get_batch_feed_dicts(trader, seeds,T, start_time):
+    seeds = list(seeds)
+    simulations = [run_scenario(trader=trader, seed=sd, T=T, start_time=start_time)  for sd in seeds]
+    batch_feed_dicts = get_feed_dict(trader=trader, mgr=simulations)
+    return batch_feed_dicts, simulations
+
+
+def batch_test_run_scenario():
+    wt, W_t, Wb_alpha, Ws_alpha, Wn_b, Wn_s, W_h, W_1, W_2, W_3, b_t, b_alpha, bn_b, bn_s, b_h, Vt_h, \
+    Vt_v, b_lambda, Vh_alpha, Vv_alpha, Va_b, Va_s, num_hidden_states, scope, batch_size, learning_rate, \
+    clip_norm, summary_dir, save_dir, decay_steps, decay_rate, momentum, device_cpu, device_gpu, only_cpu, \
+    max_events, T, start_time = make_default_trader_opts()
+    print("default trader initialized..")
+
+    sess = tf.Session()
+    print("session created")
+
+    trader = ExpRecurrentTrader(wt=wt, W_t=W_t, Wb_alpha=Wb_alpha, Ws_alpha=Ws_alpha, Wn_b=Wn_b, Wn_s=Wn_s, W_h=W_h,
+                                W_1=W_1, W_2=W_2, W_3=W_3, b_t=b_t, b_alpha=b_alpha, bn_b=bn_b, bn_s=bn_s,
+                                b_h=b_h, Vt_h=Vt_h, Vt_v=Vt_v, b_lambda=b_lambda, Vh_alpha=Vh_alpha, Vv_alpha=Vv_alpha,
+                                Va_b=Va_b, Va_s=Va_s, num_hidden_states=num_hidden_states, sess=sess, scope=scope,
+                                batch_size=batch_size, learning_rate=learning_rate, clip_norm=clip_norm,
+                                summary_dir=summary_dir,
+                                save_dir=save_dir, decay_steps=decay_steps, decay_rate=decay_rate, momentum=momentum,
+                                device_cpu=device_cpu, device_gpu=device_gpu, only_cpu=only_cpu, max_events=max_events)
+    trader.initialize()
+    print("trader created")
+
+    init_seed = 1337
+    batches = 2
+    batch_feed_dict, simulations = get_batch_feed_dicts(trader=trader, seeds=range(init_seed, init_seed+batches),
+                                                        T=T, start_time=start_time)
+
+    for sim in simulations:
+        print('NN LL = {}'.format(sim.agent.get_LL(end_time=T)))
+
+    print('TF LL = {}'.format(trader.sess.run([trader.LL_stack], feed_dict=batch_feed_dict)))
+
+
 if __name__ == '__main__':
-    test_run_scenario()
+    # test_run_scenario()
+    batch_test_run_scenario()
