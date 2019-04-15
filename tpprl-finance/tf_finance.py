@@ -10,8 +10,8 @@ import tensorflow as tf
 from util_finance import _now, variable_summaries
 from cell_finance import TPPRExpMarkedCellStacked_finance
 
-# SAVE_DIR = "/NL/tpprl-result/work/rl-finance/"
-SAVE_DIR = "/home/supriya/MY_HOME/MPI-SWS/dataset"
+SAVE_DIR = "/NL/tpprl-result/work/rl-finance/"
+# SAVE_DIR = "/home/supriya/MY_HOME/MPI-SWS/dataset"
 HIDDEN_LAYER_DIM = 8
 MAX_AMT = 1000.0
 MAX_SHARE = 100
@@ -476,8 +476,8 @@ class ExpRecurrentTrader:
                  device_cpu, device_gpu, only_cpu, max_events):
         self.summary_dir = summary_dir
         self.save_dir = save_dir
-        self.tf_dtype = tf.float64
-        self.np_dtype = np.float64
+        self.tf_dtype = tf.float32
+        self.np_dtype = np.float32
 
         self.learning_rate = learning_rate
         self.decay_rate = decay_rate
@@ -811,6 +811,8 @@ class ExpRecurrentTrader:
                 #                         y
                 #                     )
                 #                 )
+                                # TODO: error for dim 4
+
                 #         self.clipped_avg_gradients_stack, self.grad_norm_stack = \
                 #             tf.clip_by_global_norm(
                 #                 [grad for grad, _ in self.avg_gradient_stack],
@@ -970,8 +972,8 @@ def read_raw_data(seed):
     # RS = np.random.RandomState(seed=seed)
     # file_num = RS.choice(a=total_num_files, size=1) # draw sample of size 1 with uniform distribution
     # raw = pd.read_csv(SAVE_DIR + "/daily_data/{}_day.csv".format(file_num)
-    # raw = pd.read_csv(SAVE_DIR + "/daily_data/0_day.csv")
-    raw = pd.read_csv(SAVE_DIR + "/0_day.csv")
+    raw = pd.read_csv(SAVE_DIR + "/daily_data/0_day.csv")
+    # raw = pd.read_csv(SAVE_DIR + "/0_day.csv")
     df = pd.DataFrame(raw)
     return df
 
@@ -986,7 +988,7 @@ def make_default_trader_opts(seed=42):
     learning_rate = 0.01
     clip_norm = 1.0
     RS = np.random.RandomState(seed)
-    wt = RS.randn(1, 1)
+    wt = RS.randn(1)
     # wt = np.ones([1,1])
     # W_t = np.zeros((num_hidden_states, 1))
     # Wb_alpha = np.zeros((num_hidden_states, 1))
@@ -1025,10 +1027,10 @@ def make_default_trader_opts(seed=42):
     bn_b = RS.randn(num_hidden_states, 1)
     bn_s = RS.randn(num_hidden_states, 1)
     Vt_h = RS.randn(1, num_hidden_states)
-    Vt_v = RS.randn(1, 1)
-    b_lambda = RS.randn(1, 1)
+    Vt_v = RS.randn(1)
+    b_lambda = RS.randn(1)
     Vh_alpha = RS.randn(1, num_hidden_states)
-    Vv_alpha = RS.randn(1, 1)
+    Vv_alpha = RS.randn(1)
     Va_b = RS.randn(MAX_SHARE, num_hidden_states)
     Va_s = RS.randn(MAX_SHARE, num_hidden_states)
 
