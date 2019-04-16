@@ -112,9 +112,9 @@ class Strategy:
 class RLStrategy(Strategy):
     def __init__(self, wt, W_t, Wb_alpha, Ws_alpha, Wn_b, Wn_s,
                  W_h, W_1, W_2, W_3, b_t, b_alpha, bn_b, bn_s, b_h,
-                 Vt_h, Vt_v, b_lambda, Vh_alpha, Vv_alpha, Va_b, Va_s, seed):
+                 Vt_h, Vt_v, b_lambda, Vh_alpha, Vv_alpha, Va_b, Va_s, RS):
         super(RLStrategy, self).__init__()
-        self.RS = np.random.RandomState(seed)
+        self.RS = RS  # np.random.RandomState(seed)
         self.wt = wt
         self.W_t = W_t
         self.Wb_alpha = Wb_alpha
@@ -335,8 +335,11 @@ class RLStrategy(Strategy):
         LL_log_numpy = np.squeeze(np.log(self.u_theta_t))
         LL_alpha_i_numpy = np.log(prob_alpha[alpha_i])
         LL_n_i_numpy = np.log(prob_n[n_i])
+        # print("LL_log_numpy: ",LL_log_numpy)
+        # print("LL_alpha_i-numpy: ", LL_alpha_i_numpy)
+        # print("LL_n_i_numpy: ", LL_n_i_numpy)
 
-        self.loglikelihood +=  LL_log_numpy + LL_alpha_i_numpy + LL_n_i_numpy
+        self.loglikelihood += LL_log_numpy + LL_alpha_i_numpy + LL_n_i_numpy
 
         return alpha_i, n_i
 
@@ -361,7 +364,7 @@ class RLStrategy(Strategy):
 
 
 class Environment:
-    def __init__(self, T, time_gap, raw_data, agent, start_time, seed):
+    def __init__(self, T, time_gap, raw_data, agent, start_time, RS):
         self.T = T
         # self.state = State(curr_time=start_time)
         self.list_t_delta = []  # list of time delta
@@ -378,7 +381,7 @@ class Environment:
         self.raw_data = raw_data
         self.agent = agent
         self.curr_time = start_time
-        self.RS = np.random.RandomState(seed)
+        self.RS = RS  #np.random.RandomState(seed)
         # for reading market value per minute
         if self.time_gap == "minute":
             # TODO need to find a way to group by minute using unix timestamp
@@ -441,7 +444,7 @@ class Environment:
                     self.apply_event(current_event)
                     self.v_last = current_event.v_curr
 
-        print("LL:", self.agent.get_LL(end_time=self.T))
+        # print("LL:", self.agent.get_LL(end_time=self.T))
 
     def get_last_interval(self):
         return self.T - self.agent.last_time
@@ -1043,7 +1046,6 @@ def make_default_trader_opts(seed=42):
     batch_size = 2
     T = 1254153600  #0_day end time=1254153600, 0_hour end time=1254133800
 
-
     device_cpu = '/cpu:0'
     device_gpu = '/gpu:0'
     only_cpu = True
@@ -1112,6 +1114,7 @@ def get_feed_dict(trader, mgr):
 
 def run_scenario(trader, seed, T, start_time):
     # use seed to select the trade data file
+    RS = np.random.RandomState(seed=seed)
     raw_data = read_raw_data(seed=seed)
     wt = trader.sess.run(trader.tf_wt)
     W_t = trader.sess.run(trader.tf_W_t)
@@ -1139,10 +1142,10 @@ def run_scenario(trader, seed, T, start_time):
     # agent = SimpleStrategy(time_between_trades_secs=5)
     # agent = BollingerBandStrategy(window=20, num_std=2)
     agent = RLStrategy(wt, W_t, Wb_alpha, Ws_alpha, Wn_b, Wn_s, W_h, W_1, W_2, W_3, b_t, b_alpha, bn_b, bn_s, b_h, Vt_h,
-                       Vt_v, b_lambda, Vh_alpha, Vv_alpha, Va_b, Va_s, seed)
+                       Vt_v, b_lambda, Vh_alpha, Vv_alpha, Va_b, Va_s, RS)
     # start time is set to '2009-09-28 09:30:00' i.e. 9:30 am of 28sept2009: 1254130200
     # max time T is set to '2009-09-28 16:00:00' i.e. same day 4pm: 1254153600
-    mgr = Environment(T=T, time_gap="second", raw_data=raw_data, agent=agent, start_time=start_time, seed=seed)
+    mgr = Environment(T=T, time_gap="second", raw_data=raw_data, agent=agent, start_time=start_time, RS=RS)
     mgr.simulator()
     return mgr
 
@@ -1199,9 +1202,9 @@ def test_run_scenario():
     # print("feed_dict saved as json at location:{}".format(save_dir+"/tf_feed_dict.json"))
 
 
-def get_batch_feed_dicts(trader, seeds,T, start_time):
+def get_batch_feed_dicts(trader, seeds, T, start_time):
     seeds = list(seeds)
-    simulations = [run_scenario(trader=trader, seed=sd, T=T, start_time=start_time)  for sd in seeds]
+    simulations = [run_scenario(trader=trader, seed=42, T=T, start_time=start_time) for sd in seeds]
     batch_feed_dicts = get_feed_dict(trader=trader, mgr=simulations)
     return batch_feed_dicts, simulations
 
@@ -1236,6 +1239,9 @@ def batch_test_run_scenario():
         print('NN LL = {}'.format(sim.agent.get_LL(end_time=T)))
 
     print('TF LL = {}'.format(trader.sess.run([trader.LL_stack], feed_dict=batch_feed_dict)))
+    # print('TF LL_log = {}'.format(trader.sess.run([trader.LL_log_terms_stack], feed_dict=batch_feed_dict)))
+    # print('TF LL_alpha_i = {}'.format(trader.sess.run([trader.LL_alpha_i_stack], feed_dict=batch_feed_dict)))
+    # print('TF LL_n_i = {}'.format(trader.sess.run([trader.LL_n_i_stack], feed_dict=batch_feed_dict)))
 
 
 if __name__ == '__main__':

@@ -24,7 +24,7 @@ class TPPRExpMarkedCellStacked_finance(tf.contrib.rnn.RNNCell):
         self._hidden_state_size = hidden_state_size
         self.tf_dtype = tf_dtype
 
-        self.batch_size, dim1, dim2 = W_t.get_shape()
+        self.batch_size, self.hidden_dim_size, dim2 = W_t.get_shape()
 
         self.tf_wt = wt
         self.tf_W_t = W_t
@@ -103,8 +103,10 @@ class TPPRExpMarkedCellStacked_finance(tf.contrib.rnn.RNNCell):
                 return sell_n_i
 
             val_alpha_i = tf.batch_gather(alpha_i, zeroth_index)
+            val_alpha_i_broadcast = tf.broadcast_to(input=val_alpha_i, shape=[self.batch_size, self.hidden_dim_size])
+            zeroth_index_broadcast = tf.broadcast_to(input=zeroth_index, shape=[self.batch_size, self.hidden_dim_size])
             eta_i = tf.where(
-                tf.equal(val_alpha_i, zeroth_index, name="eta_i_pred"),
+                tf.equal(val_alpha_i_broadcast, zeroth_index_broadcast, name="eta_i_pred"),
                 encode_buy_n_i(),
                 encode_sell_n_i(),
                 name="encode_n_i_eta_i"
@@ -141,9 +143,9 @@ class TPPRExpMarkedCellStacked_finance(tf.contrib.rnn.RNNCell):
             return hnext
 
         zeroth_index = tf.zeros(shape=[self.batch_size, 1], dtype=tf.int32)
+        tensor_of_ones = tf.ones(shape=[self.batch_size, 1], dtype=tf.float32)
         val_is_trade_feedback = tf.batch_gather(is_trade_feedback, zeroth_index)
-        cond1 = tf.equal(val_is_trade_feedback, 1, name="h_next_pred")
-
+        cond1 = tf.broadcast_to(tf.equal(val_is_trade_feedback, tensor_of_ones, name="h_next_pred"), shape=tf.shape(h_prev))
         h_next = tf.where(
             cond1,
             calculate_h_next(),
@@ -156,9 +158,9 @@ class TPPRExpMarkedCellStacked_finance(tf.contrib.rnn.RNNCell):
         u_theta = tf.squeeze(self.u_theta(h=h_prev, t_delta=t_delta, v_delta=v_delta, name='u_theta'))
 
         # LL of t_i and delta calculation
-        LL_log = tf.where(tf.equal(val_is_trade_feedback, 1, name="LL_log_pred"),
-                          tf.reshape(tf.log(u_theta), shape=[self.batch_size], name="LL_log_reshape"),
-                          tf.zeros(shape=[self.batch_size], dtype=self.tf_dtype))
+        LL_log = tf.squeeze(tf.where(tf.equal(val_is_trade_feedback, tensor_of_ones, name="LL_log_pred"),
+                          tf.reshape(tf.log(u_theta), shape=[self.batch_size, 1], name="LL_log_reshape"),
+                          tf.zeros(shape=[self.batch_size, 1], dtype=self.tf_dtype)), axis=-1)
         # LL_log = tf.reshape(tf.log(u_theta), shape=[1], name="LL_log_reshape")
         LL_int = tf.reshape((u_theta - u_theta_0) / tf.squeeze(self.tf_wt), shape=[self.batch_size],
                             name="LL_int_reshape")
@@ -184,9 +186,9 @@ class TPPRExpMarkedCellStacked_finance(tf.contrib.rnn.RNNCell):
         #                      '==========================='))
         # # LL of alpha_i
         # with tf.control_dependencies(opts):
-        LL_alpha_i = tf.where(tf.equal(val_is_trade_feedback, 1, name="LL_alpha_i_pred"),
+        LL_alpha_i = tf.squeeze(tf.where(tf.equal(val_is_trade_feedback, tensor_of_ones, name="LL_alpha_i_pred"),
                               tf.log(val),
-                              tf.zeros(shape=[self.batch_size], dtype=self.tf_dtype))
+                              tf.zeros(shape=[self.batch_size, 1], dtype=self.tf_dtype)),axis=-1)
 
         # calculate LL for n_i
         # Similar to numpy code, subtract the BASE CHARGES from current amt to calculate actual share that can be bought
@@ -211,7 +213,7 @@ class TPPRExpMarkedCellStacked_finance(tf.contrib.rnn.RNNCell):
             share_range_broadcast = tf.multiply(tf.ones(shape=[self.batch_size, MAX_SHARE], dtype=tf.int32),
                                                 share_range, name="share_range_broadcast")
 
-            mask = tf.where(tf.less_equal(share_range_broadcast, max_share_buy),
+            mask = tf.where(tf.less(share_range_broadcast, max_share_buy),
                             tf.ones(shape=(self.batch_size, MAX_SHARE), name="share_range_ones"),
                             tf.zeros(shape=(self.batch_size, MAX_SHARE), name="share_range_zeros"),
                             name="mask_buy")
@@ -240,7 +242,7 @@ class TPPRExpMarkedCellStacked_finance(tf.contrib.rnn.RNNCell):
             #                      'prob_n: ', prob_n, '\n',
             #                      'n_i: ', n_i, '\n',
             #                      'val: ', val, '\n',
-            #                      'is_trade_feddback: ', val_is_trade_feedback, '\n',
+            #                      'is_trade_feedback: ', val_is_trade_feedback, '\n',
             #                      'current_amt: ', current_amt,'\n',
             #                      'v_curr: ', v_curr,'\n',
             #                      '===================='))
@@ -264,7 +266,7 @@ class TPPRExpMarkedCellStacked_finance(tf.contrib.rnn.RNNCell):
             share_range_broadcast = tf.multiply(tf.ones(shape=[self.batch_size, MAX_SHARE], dtype=tf.int32),
                                                 share_range, name="share_range_broadcast")
 
-            mask = tf.where(tf.less_equal(share_range_broadcast, max_share_sell),
+            mask = tf.where(tf.less(share_range_broadcast, max_share_sell),
                             tf.ones(shape=(self.batch_size, MAX_SHARE), name="share_range_ones"),
                             tf.zeros(shape=(self.batch_size, MAX_SHARE), name="share_range_zeros"),
                             name="mask_sell")
@@ -291,7 +293,7 @@ class TPPRExpMarkedCellStacked_finance(tf.contrib.rnn.RNNCell):
             #                      'prob_n: ', prob_n, '\n',
             #                      'n_i: ', n_i,'\n',
             #                      'val: ', val, '\n',
-            #                      'is_trade_feddback: ', val_is_trade_feedback,'\n',
+            #                      'is_trade_feedback: ', val_is_trade_feedback,'\n',
             #                      'current_amt: ', current_amt, '\n',
             #                      'v_curr: ', v_curr,'\n',
             #                      '===================='))
@@ -304,7 +306,7 @@ class TPPRExpMarkedCellStacked_finance(tf.contrib.rnn.RNNCell):
         val_alpha_i = tf.batch_gather(alpha_i, zeroth_index)
         # TODO:
         prob_n = tf.where(
-            tf.equal(val_alpha_i, 0, name="encode_n_i_pred"),
+            tf.broadcast_to(tf.equal(val_alpha_i, zeroth_index, name="encode_n_i_pred"), shape=[self.batch_size, MAX_SHARE]),
             prob_n_buy(),
             prob_n_sell(),
             name="encode_n_i_eta_i"
@@ -312,10 +314,12 @@ class TPPRExpMarkedCellStacked_finance(tf.contrib.rnn.RNNCell):
 
         # LL of n_i
         val = tf.batch_gather(params=prob_n, indices=n_i)
-        LL_n_i = tf.where(tf.equal(val_is_trade_feedback, 1, name="LL_n_i_pred"),
-                          tf.log(val),
-                          tf.zeros(shape=[self.batch_size], dtype=self.tf_dtype, name="LL_n_i_zeros"),
-                          name="LL_n_i_cond")
+        LL_n_i = tf.squeeze(
+            tf.where(tf.equal(val_is_trade_feedback, tensor_of_ones, name="LL_n_i_pred"),
+                     tf.log(val),
+                     tf.zeros(shape=[self.batch_size, 1], dtype=self.tf_dtype, name="LL_n_i_zeros"),
+                     name="LL_n_i_cond"),
+            axis=-1)
         # LL_n_i = tf.reshape(tf.log(val), shape=[1], name="LL_n_i_reshape")
 
         a = tf.expand_dims(LL_log, axis=-1, name='LL_log')
