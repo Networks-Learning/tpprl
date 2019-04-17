@@ -3,6 +3,7 @@
 import sys
 import pandas as pd
 import numpy as np
+
 np.set_printoptions(precision=6)
 import os
 import tensorflow as tf
@@ -18,6 +19,7 @@ MAX_SHARE = 100
 BASE_CHARGES = 1.0
 PERCENTAGE_CHARGES = 0.001
 EPSILON = 1e-6
+
 
 class Action:
     def __init__(self, alpha, n):
@@ -178,7 +180,7 @@ class RLStrategy(Strategy):
         vtv_val = (self.Vt_v * v_delta)
         bias = self.b_lambda
         self.c1 = np.exp(vth_val +
-                         vtv_val+
+                         vtv_val +
                          bias)
         D = 1 - (self.wt / self.c1) * np.log((1 - self.u) / self.Q)
         a = np.squeeze((1 - self.u) / self.Q)
@@ -230,8 +232,8 @@ class RLStrategy(Strategy):
 
             # calculate mask
             max_share_buy = max(1, min(MAX_SHARE, int(np.floor(self.current_amt /
-                                                        (event.v_curr + (
-                                                                event.v_curr * PERCENTAGE_CHARGES))))))
+                                                               (event.v_curr + (
+                                                                       event.v_curr * PERCENTAGE_CHARGES))))))
             mask = np.expand_dims(np.append(np.ones(max_share_buy),
                                             np.zeros(MAX_SHARE - max_share_buy)), axis=1)
 
@@ -244,10 +246,11 @@ class RLStrategy(Strategy):
 
             reduce_sum = np.sum(masked_A)
             # check if the sum is zero and assign epsilon to avoid divide by zero and NaN value
-            if np.abs(reduce_sum)< EPSILON:
+            if np.abs(reduce_sum) < EPSILON:
                 reduce_sum = EPSILON
             prob_n = masked_A / reduce_sum
             prob_n = np.squeeze(prob_n)
+            # print("exp_A: ", exp_A)
             # print("max_share_buy: ", max_share_buy)
             # print("reduce_sum: ", reduce_sum)
             # print("prob_n: ", prob_n)
@@ -257,7 +260,6 @@ class RLStrategy(Strategy):
             n_i = self.RS.choice(np.arange(MAX_SHARE), p=np.squeeze(prob_n))
             # print("n_i: ", n_i)
             # print("val: ", np.log(prob_n[n_i]))
-            # print()
 
         else:
             A = np.array(self.Va_s).dot(self.h_i)
@@ -283,6 +285,7 @@ class RLStrategy(Strategy):
                 reduce_sum = EPSILON
             prob_n = masked_A / reduce_sum
             prob_n = np.squeeze(prob_n)
+            # print("exp_A: ", exp_A)
             # print("max_share_sell: ", max_share_sell)
             # print("reduce_sum: ", reduce_sum)
             # print("prob_n: ", prob_n)
@@ -290,7 +293,6 @@ class RLStrategy(Strategy):
             n_i = self.RS.choice(np.arange(MAX_SHARE), p=np.squeeze(prob_n))
             # print("n_i: ", n_i)
             # print("val: ", np.log(prob_n[n_i]))
-            # print()
 
         # encode event details
         t_delta = (self.curr_time - self.last_time)
@@ -338,6 +340,7 @@ class RLStrategy(Strategy):
         # print("LL_log_numpy: ",LL_log_numpy)
         # print("LL_alpha_i-numpy: ", LL_alpha_i_numpy)
         # print("LL_n_i_numpy: ", LL_n_i_numpy)
+        # print()
 
         self.loglikelihood += LL_log_numpy + LL_alpha_i_numpy + LL_n_i_numpy
 
@@ -350,7 +353,7 @@ class RLStrategy(Strategy):
         # else:
         return 1 - np.exp((self.c1 / self.wt) * (1 - np.exp(self.wt * (t - self.last_time))))
 
-    def get_LL(self, end_time):
+    def get_LL_last_interval(self, end_time):
         # add LL for last interval
         self.c1 = np.exp(
             np.array(self.Vt_h).dot(self.h_i) + (self.Vt_v * (self.curr_price - self.last_price)) + self.b_lambda)
@@ -359,7 +362,9 @@ class RLStrategy(Strategy):
         LL_last_term_numpy = np.squeeze((self.u_theta_t - u_theta_0) / self.wt)
         # print("t_delta: ",(end_time - self.last_time))
         # print("LL_last_term_numpy: ", LL_last_term_numpy)
-        self.loglikelihood += LL_last_term_numpy
+        return LL_last_term_numpy
+
+    def get_LL(self):
         return self.loglikelihood
 
 
@@ -381,7 +386,7 @@ class Environment:
         self.raw_data = raw_data
         self.agent = agent
         self.curr_time = start_time
-        self.RS = RS  #np.random.RandomState(seed)
+        self.RS = RS  # np.random.RandomState(seed)
         # for reading market value per minute
         if self.time_gap == "minute":
             # TODO need to find a way to group by minute using unix timestamp
@@ -436,7 +441,8 @@ class Environment:
                     trade_price = current_event.v_curr
                     alpha_i, n_i = self.agent.get_next_action_item(current_event)
                     current_event = TradeFeedback(t_i=next_agent_action_time, v_curr=trade_price,
-                                                  alpha_i=alpha_i, n_i=n_i, event_curr_amt=self.agent.amount_before_trade,
+                                                  alpha_i=alpha_i, n_i=n_i,
+                                                  event_curr_amt=self.agent.amount_before_trade,
                                                   portfolio=self.agent.owned_shares)
                     self.agent.update_owned_shares(current_event)
                     # update the current time to trade time
@@ -444,7 +450,8 @@ class Environment:
                     self.apply_event(current_event)
                     self.v_last = current_event.v_curr
 
-        # print("LL:", self.agent.get_LL(end_time=self.T))
+        self.agent.loglikelihood += self.agent.get_LL_last_interval(end_time=self.T)
+        print("LL:", self.agent.get_LL())
 
     def get_last_interval(self):
         return self.T - self.agent.last_time
@@ -507,9 +514,11 @@ class ExpRecurrentTrader:
                         self.tf_W_t = tf.get_variable(name='W_t', shape=W_t.shape,
                                                       initializer=tf.constant_initializer(W_t), dtype=self.tf_dtype)
                         self.tf_Wb_alpha = tf.get_variable(name='Wb_alpha', shape=Wb_alpha.shape,
-                                                           initializer=tf.constant_initializer(Wb_alpha), dtype=self.tf_dtype)
+                                                           initializer=tf.constant_initializer(Wb_alpha),
+                                                           dtype=self.tf_dtype)
                         self.tf_Ws_alpha = tf.get_variable(name='Ws_alpha', shape=Ws_alpha.shape,
-                                                           initializer=tf.constant_initializer(Ws_alpha), dtype=self.tf_dtype)
+                                                           initializer=tf.constant_initializer(Ws_alpha),
+                                                           dtype=self.tf_dtype)
                         self.tf_Wn_b = tf.get_variable(name='Wn_b', shape=Wn_b.shape,
                                                        initializer=tf.constant_initializer(Wn_b), dtype=self.tf_dtype)
                         self.tf_Wn_s = tf.get_variable(name='Wn_s', shape=Wn_s.shape,
@@ -525,7 +534,8 @@ class ExpRecurrentTrader:
                         self.tf_b_t = tf.get_variable(name='b_t', shape=b_t.shape,
                                                       initializer=tf.constant_initializer(b_t), dtype=self.tf_dtype)
                         self.tf_b_alpha = tf.get_variable(name='b_alpha', shape=b_alpha.shape,
-                                                          initializer=tf.constant_initializer(b_alpha), dtype=self.tf_dtype)
+                                                          initializer=tf.constant_initializer(b_alpha),
+                                                          dtype=self.tf_dtype)
                         self.tf_bn_b = tf.get_variable(name='bn_b', shape=bn_b.shape,
                                                        initializer=tf.constant_initializer(bn_b), dtype=self.tf_dtype)
                         self.tf_bn_s = tf.get_variable(name='bn_s', shape=bn_s.shape,
@@ -554,21 +564,24 @@ class ExpRecurrentTrader:
                 with tf.variable_scope('output'):
                     with tf.device(var_device):
                         self.tf_wt = tf.get_variable(name='wt', shape=wt.shape,
-                                                     initializer=tf.constant_initializer(wt),dtype=self.tf_dtype)
+                                                     initializer=tf.constant_initializer(wt), dtype=self.tf_dtype)
                         self.tf_Vt_h = tf.get_variable(name='Vt_h', shape=Vt_h.shape,
-                                                       initializer=tf.constant_initializer(Vt_h),dtype=self.tf_dtype)
+                                                       initializer=tf.constant_initializer(Vt_h), dtype=self.tf_dtype)
                         self.tf_Vt_v = tf.get_variable(name='Vt_v', shape=Vt_v.shape,
-                                                       initializer=tf.constant_initializer(Vt_v),dtype=self.tf_dtype)
+                                                       initializer=tf.constant_initializer(Vt_v), dtype=self.tf_dtype)
                         self.tf_b_lambda = tf.get_variable(name='b_lambda', shape=b_lambda.shape,
-                                                           initializer=tf.constant_initializer(b_lambda),dtype=self.tf_dtype)
+                                                           initializer=tf.constant_initializer(b_lambda),
+                                                           dtype=self.tf_dtype)
                         self.tf_Vh_alpha = tf.get_variable(name='Vh_alpha', shape=Vh_alpha.shape,
-                                                           initializer=tf.constant_initializer(Vh_alpha),dtype=self.tf_dtype)
+                                                           initializer=tf.constant_initializer(Vh_alpha),
+                                                           dtype=self.tf_dtype)
                         self.tf_Vv_alpha = tf.get_variable(name='Vv_alpha', shape=Vv_alpha.shape,
-                                                           initializer=tf.constant_initializer(Vv_alpha),dtype=self.tf_dtype)
+                                                           initializer=tf.constant_initializer(Vv_alpha),
+                                                           dtype=self.tf_dtype)
                         self.tf_Va_b = tf.get_variable(name='Va_b', shape=Va_b.shape,
-                                                       initializer=tf.constant_initializer(Va_b),dtype=self.tf_dtype)
+                                                       initializer=tf.constant_initializer(Va_b), dtype=self.tf_dtype)
                         self.tf_Va_s = tf.get_variable(name='Va_s', shape=Va_s.shape,
-                                                       initializer=tf.constant_initializer(Va_s),dtype=self.tf_dtype)
+                                                       initializer=tf.constant_initializer(Va_s), dtype=self.tf_dtype)
 
                 # Create a large dynamic_rnn kind of network which can calculate
                 # the gradients for a given batch of simulations.
@@ -705,10 +718,10 @@ class ExpRecurrentTrader:
 
                             # self.LL_stack = self.LL_last_term_stack
                             self.LL_stack = (tf.reduce_sum(self.LL_log_terms_stack, axis=1)
-                                            - tf.reduce_sum(self.LL_int_terms_stack, axis=1)
-                                            + tf.reduce_sum(self.LL_alpha_i_stack, axis=1)
-                                            + tf.reduce_sum(self.LL_n_i_stack, axis=1)
-                                            + self.LL_last_term_stack)
+                                             - tf.reduce_sum(self.LL_int_terms_stack, axis=1)
+                                             + tf.reduce_sum(self.LL_alpha_i_stack, axis=1)
+                                             + tf.reduce_sum(self.LL_n_i_stack, axis=1)
+                                             + self.LL_last_term_stack)
 
                             tf_seq_len = tf.squeeze(self.tf_batch_seq_len, axis=-1)
                             self.loss_stack = (tf.reduce_sum(self.loss_terms_stack, axis=1) +
@@ -768,80 +781,84 @@ class ExpRecurrentTrader:
                                       self.Vh_alpha_mini, self.Vv_alpha_mini, self.Va_b_mini,
                                       self.Va_s_mini]
 
-                # with tf.name_scope('stack_grad'):
-                #     with tf.device(var_device):
-                #         self.LL_grad_stacked = {x: tf.gradients(self.LL_stack, x)
-                #                                 for x in self.all_mini_vars}
-                #         self.loss_grad_stacked = {x: tf.gradients(self.loss_stack, x)
-                #                                   for x in self.all_mini_vars}
-                #         self.avg_gradient_stack = []
-                #         avg_baseline = 0.0
-                #         # Removing the average reward + loss is not optimal baseline,
-                #         # but still reduces variance significantly.
-                #         coef = tf.squeeze(self.tf_batch_rewards, axis=-1) + self.loss_stack - avg_baseline
-                #         for x, y in zip(self.all_mini_vars, self.all_tf_vars):
-                #             LL_grad = self.LL_grad_stacked[x][0]
-                #             loss_grad = self.loss_grad_stacked[x][0]
-                #             # if self.set_wt_zero and y == self.tf_wt:
-                #             #     self.avg_gradient_stack.append(([0.0], y))
-                #             #     continue
-                #             dim = len(LL_grad.get_shape())
-                #             if dim == 1:
-                #                 self.avg_gradient_stack.append(
-                #                     (tf.reduce_mean(LL_grad * coef + loss_grad, axis=0), y)
-                #                 )
-                #             elif dim == 2:
-                #                 self.avg_gradient_stack.append(
-                #                     (
-                #                         tf.reduce_mean(
-                #                             LL_grad * tf.tile(tf.reshape(coef, (-1, 1)),
-                #                                               [1, tf.shape(LL_grad)[1]]) +
-                #                             loss_grad,
-                #                             axis=0
-                #                         ),
-                #                         y
-                #                     )
-                #                 )
-                #             elif dim == 3:
-                #                 self.avg_gradient_stack.append(
-                #                     (
-                #                         tf.reduce_mean(
-                #                             LL_grad * tf.tile(tf.reshape(coef, (-1, 1, 1)),
-                #                                               [1, tf.shape(LL_grad)[1], tf.shape(LL_grad)[2]]) +
-                #                             loss_grad,
-                #                             axis=0
-                #                         ),
-                #                         y
-                #                     )
-                #                 )
-                                # TODO: error for dim 4
+                with tf.name_scope('stack_grad'):
+                    with tf.device(var_device):
+                        self.LL_grad_stacked = {x: tf.gradients(self.LL_stack, x)
+                                                for x in self.all_mini_vars}
+                        grads = {x: tf.gradients(self.loss_stack, x) for x in self.all_mini_vars}
+                        self.loss_grad_stacked = {x: grads[x]
+                                                    if None not in grads[x]
+                                                    else tf.zeros_like(x)
+                                                  for x in self.all_mini_vars}
 
-                #         self.clipped_avg_gradients_stack, self.grad_norm_stack = \
-                #             tf.clip_by_global_norm(
-                #                 [grad for grad, _ in self.avg_gradient_stack],
-                #                 clip_norm=self.clip_norm
-                #             )
-                #
-                #         self.clipped_avg_gradient_stack = list(zip(
-                #             self.clipped_avg_gradients_stack,
-                #             [var for _, var in self.avg_gradient_stack]
-                #         ))
+                        self.avg_gradient_stack = []
+                        avg_baseline = 0.0
+                        # Removing the average reward + loss is not optimal baseline,
+                        # but still reduces variance significantly.
+                        coef = tf.squeeze(self.tf_batch_rewards, axis=-1) + self.loss_stack - avg_baseline
+                        for x, y in zip(self.all_mini_vars, self.all_tf_vars):
+                            LL_grad = self.LL_grad_stacked[x][0]
+                            loss_grad = self.loss_grad_stacked[x][0]
+                            # if self.set_wt_zero and y == self.tf_wt:
+                            #     self.avg_gradient_stack.append(([0.0], y))
+                            #     continue
+                            dim = len(LL_grad.get_shape())
+                            if dim == 1:
+                                self.avg_gradient_stack.append(
+                                    (tf.reduce_mean(LL_grad * coef + loss_grad, axis=0), y)
+                                )
+                            elif dim == 2:
+                                self.avg_gradient_stack.append(
+                                    (
+                                        tf.reduce_mean(
+                                            LL_grad * tf.tile(tf.reshape(coef, (-1, 1)),
+                                                              [1, tf.shape(LL_grad)[1]]) +
+                                            loss_grad,
+                                            axis=0
+                                        ),
+                                        y
+                                    )
+                                )
+                            elif dim == 3:
+                                self.avg_gradient_stack.append(
+                                    (
+                                        tf.reduce_mean(
+                                            LL_grad * tf.tile(tf.reshape(coef, (-1, 1, 1)),
+                                                              [1, tf.shape(LL_grad)[1], tf.shape(LL_grad)[2]]) +
+                                            loss_grad,
+                                            axis=0
+                                        ),
+                                        y
+                                    )
+                                )
+                            # TODO: write else to show error for dim 4
 
-                # self.tf_learning_rate = tf.train.inverse_time_decay(
-                #     self.learning_rate,
-                #     global_step=self.global_step,
-                #     decay_steps=self.decay_steps,
-                #     decay_rate=self.decay_rate
-                # )
-                #
-                # self.opt = tf.train.AdamOptimizer(
-                #     learning_rate=self.tf_learning_rate,
-                #     beta1=momentum
-                # )
-                # self.sgd_stacked_op = self.opt.apply_gradients(
-                #     self.clipped_avg_gradient_stack,
-                #     global_step=self.global_step
-                # )
+                        self.clipped_avg_gradients_stack, self.grad_norm_stack = \
+                            tf.clip_by_global_norm(
+                                [grad for grad, _ in self.avg_gradient_stack],
+                                clip_norm=self.clip_norm
+                            )
+
+                        self.clipped_avg_gradient_stack = list(zip(
+                            self.clipped_avg_gradients_stack,
+                            [var for _, var in self.avg_gradient_stack]
+                        ))
+
+                self.tf_learning_rate = tf.train.inverse_time_decay(
+                    self.learning_rate,
+                    global_step=self.global_step,
+                    decay_steps=self.decay_steps,
+                    decay_rate=self.decay_rate
+                )
+
+                self.opt = tf.train.AdamOptimizer(
+                    learning_rate=self.tf_learning_rate,
+                    beta1=momentum
+                )
+                self.sgd_stacked_op = self.opt.apply_gradients(
+                    self.clipped_avg_gradient_stack,
+                    global_step=self.global_step
+                )
 
                 self.sess = sess
 
@@ -897,7 +914,6 @@ class ExpRecurrentTrader:
         grad_norm_op = self.grad_norm_stack
         LL_op = self.LL_stack
         loss_op = self.loss_stack
-        entropy_op = self.entropy_stack
         chkpt_file = os.path.join(self.save_dir, 'tpprl.ckpt')
         pool = None
         try:
@@ -913,16 +929,16 @@ class ExpRecurrentTrader:
                 if with_summaries:
                     reward, LL, loss, entropy, grad_norm, summaries, step, lr, _ = \
                         self.sess.run([self.tf_batch_rewards, LL_op, loss_op,
-                                       entropy_op, grad_norm_op,
+                                       grad_norm_op,
                                        self.tf_merged_summaries,
                                        self.global_step, self.tf_learning_rate,
                                        train_op],
                                       feed_dict=f_d)
-                    train_writer.add_summary(summaries, step)
+                    # train_writer.add_summary(summaries, step)
                 else:
                     reward, LL, loss, entropy, grad_norm, step, lr, _ = \
                         self.sess.run([self.tf_batch_rewards, LL_op, loss_op,
-                                       entropy_op, grad_norm_op,
+                                       grad_norm_op,
                                        self.global_step, self.tf_learning_rate,
                                        train_op],
                                       feed_dict=f_d)
@@ -960,8 +976,8 @@ class ExpRecurrentTrader:
             if pool is not None:
                 pool.close()
 
-            if with_summaries:
-                train_writer.flush()
+            # if with_summaries:
+            #     train_writer.flush()
 
             print('Saving model!')
             self.saver.save(self.sess, chkpt_file, global_step=self.global_step, )
@@ -1020,7 +1036,8 @@ def make_default_trader_opts(seed=42):
     Ws_alpha = RS.randn(num_hidden_states, 1)
     Wn_b = RS.randn(num_hidden_states, 1)
     Wn_s = RS.randn(num_hidden_states, 1)
-    W_h = RS.randn(num_hidden_states, num_hidden_states) * 0.1 + np.diag(np.ones(num_hidden_states))  # Careful initialization
+    W_h = RS.randn(num_hidden_states, num_hidden_states) * 0.1 + np.diag(
+        np.ones(num_hidden_states))  # Careful initialization
     W_1 = RS.randn(num_hidden_states, num_hidden_states)
     W_2 = RS.randn(num_hidden_states, num_hidden_states)
     W_3 = RS.randn(num_hidden_states, num_hidden_states)
@@ -1044,7 +1061,7 @@ def make_default_trader_opts(seed=42):
     momentum = 0.9
     max_events = 1
     batch_size = 2
-    T = 1254153600  #0_day end time=1254153600, 0_hour end time=1254133800
+    T = 1254153600  # 5 milliseconds=1254130205  #0_day end time=1254153600, 0_hour end time=1254133800
 
     device_cpu = '/cpu:0'
     device_gpu = '/gpu:0'
@@ -1069,7 +1086,8 @@ def get_feed_dict(trader, mgr):
     portfolio_shape = (batch_size, max_events, types_of_portfolio)
     batch_rewards = np.asarray([m.reward_fn() for m in mgr])[:, np.newaxis]
 
-    batch_last_interval = np.reshape(np.asarray([m.get_last_interval() for m in mgr], dtype=float), newshape=(batch_size, 1))
+    batch_last_interval = np.reshape(np.asarray([m.get_last_interval() for m in mgr], dtype=float),
+                                     newshape=(batch_size, 1))
 
     batch_seq_len = np.asarray([m.get_num_events() for m in mgr], dtype=float)[:, np.newaxis]
 
@@ -1189,7 +1207,7 @@ def test_run_scenario():
     print("TF LL_last_term_stack = {}".format(trader.sess.run([trader.LL_last_term_stack], feed_dict=feed_dict)))
     print("TF LL_alpha_i_stack = {}".format(trader.sess.run([trader.LL_alpha_i_stack], feed_dict=feed_dict)))
     print("TF LL_n_i_stack = {}".format(trader.sess.run([trader.LL_n_i_stack], feed_dict=feed_dict)))
-    print('NN LL = {}'.format(mgr.agent.get_LL(end_time=T)))
+    print('NN LL = {}'.format(mgr.agent.get_LL()))
     print('TF LL = {}'.format(trader.sess.run([trader.LL_stack], feed_dict=feed_dict)))
     '''
     (tf.reduce_sum(self.LL_log_terms_stack, axis=1) - 
@@ -1204,7 +1222,7 @@ def test_run_scenario():
 
 def get_batch_feed_dicts(trader, seeds, T, start_time):
     seeds = list(seeds)
-    simulations = [run_scenario(trader=trader, seed=42, T=T, start_time=start_time) for sd in seeds]
+    simulations = [run_scenario(trader=trader, seed=sd, T=T, start_time=start_time) for sd in seeds]
     batch_feed_dicts = get_feed_dict(trader=trader, mgr=simulations)
     return batch_feed_dicts, simulations
 
@@ -1232,11 +1250,11 @@ def batch_test_run_scenario():
 
     init_seed = 1337
     batches = 2
-    batch_feed_dict, simulations = get_batch_feed_dicts(trader=trader, seeds=range(init_seed, init_seed+batches),
+    batch_feed_dict, simulations = get_batch_feed_dicts(trader=trader, seeds=range(init_seed, init_seed + batches),
                                                         T=T, start_time=start_time)
 
     for sim in simulations:
-        print('NN LL = {}'.format(sim.agent.get_LL(end_time=T)))
+        print('NN LL = {}'.format(sim.agent.get_LL()))
 
     print('TF LL = {}'.format(trader.sess.run([trader.LL_stack], feed_dict=batch_feed_dict)))
     # print('TF LL_log = {}'.format(trader.sess.run([trader.LL_log_terms_stack], feed_dict=batch_feed_dict)))

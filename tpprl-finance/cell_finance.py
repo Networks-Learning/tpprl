@@ -210,8 +210,7 @@ class TPPRExpMarkedCellStacked_finance(tf.contrib.rnn.RNNCell):
                 tf.ones(shape=(self.batch_size, 1), dtype=tf.int32, name="ones_max_share_buy"),
                 tf.math.minimum(batch_max_share, num_share_buy))
             share_range = tf.range(start=0, limit=MAX_SHARE, dtype=tf.int32, name="share_range_buy")
-            share_range_broadcast = tf.multiply(tf.ones(shape=[self.batch_size, MAX_SHARE], dtype=tf.int32),
-                                                share_range, name="share_range_broadcast")
+            share_range_broadcast = tf.broadcast_to(share_range, shape=[self.batch_size, MAX_SHARE])
 
             mask = tf.where(tf.less(share_range_broadcast, max_share_buy),
                             tf.ones(shape=(self.batch_size, MAX_SHARE), name="share_range_ones"),
@@ -225,15 +224,15 @@ class TPPRExpMarkedCellStacked_finance(tf.contrib.rnn.RNNCell):
             masked_A = tf.multiply(mask, exp_A, name="prob_buy_multiply_mask_A")
             # prob_n = masked_A / tf.math.maximum(tf.reduce_sum(masked_A, axis=-1), EPSILON)
 
-            reduce_sum = tf.reduce_sum(masked_A, axis=-1, name="prob_buy_reduce_sum")
+            reduce_sum = tf.reduce_sum(masked_A, axis=-1, name="prob_buy_reduce_sum", keepdims=True)
             reduce_sum = tf.where(
-                tf.less_equal(tf.squeeze(tf.abs(reduce_sum)), EPSILON, name="avoid_zero_division_buy"),
-                tf.zeros(shape=[self.batch_size], dtype=self.tf_dtype) + EPSILON,
+                tf.less_equal(tf.abs(reduce_sum), EPSILON, name="avoid_zero_division_buy"),
+                tf.zeros(shape=[self.batch_size, 1], dtype=self.tf_dtype) + EPSILON,
                 reduce_sum)
             reduce_sum_broadcast = tf.broadcast_to(input=reduce_sum, shape=(self.batch_size, MAX_SHARE),
                                                    name="prob_n_sell_braodacast")
             prob_n = tf.math.divide(masked_A, reduce_sum_broadcast, name="prob_n_buy_divide")
-            # val = tf.log(tf.squeeze(tf.gather(params=tf.squeeze(prob_n), indices=tf.squeeze(n_i), axis=-1)))
+            val = tf.log(tf.batch_gather(prob_n, n_i))
             # opts = []
             # opts.append(tf.print('A: ', A, '\n',
             #                      'max_share_buy: ', max_share_buy, '\n',
@@ -242,7 +241,8 @@ class TPPRExpMarkedCellStacked_finance(tf.contrib.rnn.RNNCell):
             #                      'prob_n: ', prob_n, '\n',
             #                      'n_i: ', n_i, '\n',
             #                      'val: ', val, '\n',
-            #                      'is_trade_feedback: ', val_is_trade_feedback, '\n',
+            #                      'is_trade_feedback: ', is_trade_feedback, '\n',
+            #                      'portfolio: ', portfolio, '\n',
             #                      'current_amt: ', current_amt,'\n',
             #                      'v_curr: ', v_curr,'\n',
             #                      '===================='))
@@ -263,8 +263,7 @@ class TPPRExpMarkedCellStacked_finance(tf.contrib.rnn.RNNCell):
                                         shape=(self.batch_size, 1))
 
             share_range = tf.range(start=0, limit=MAX_SHARE, dtype=tf.int32, name="share_range_sell")
-            share_range_broadcast = tf.multiply(tf.ones(shape=[self.batch_size, MAX_SHARE], dtype=tf.int32),
-                                                share_range, name="share_range_broadcast")
+            share_range_broadcast = tf.broadcast_to(share_range, shape=[self.batch_size, MAX_SHARE])
 
             mask = tf.where(tf.less(share_range_broadcast, max_share_sell),
                             tf.ones(shape=(self.batch_size, MAX_SHARE), name="share_range_ones"),
@@ -276,24 +275,25 @@ class TPPRExpMarkedCellStacked_finance(tf.contrib.rnn.RNNCell):
             # mask = tf.cast(append1, dtype=self.tf_dtype)
             exp_A = tf.exp(A, name="exp_A_sell")
             masked_A = tf.multiply(mask, exp_A, name="prob_sell_multiply_mask_A")
-            reduce_sum = tf.reduce_sum(masked_A, axis=-1, name="prob_sell_reduce_sum")
+            reduce_sum = tf.reduce_sum(masked_A, axis=-1, name="prob_sell_reduce_sum", keepdims=True)
             reduce_sum = tf.where(
-                tf.less_equal(tf.squeeze(tf.abs(reduce_sum)), EPSILON, name="avoid_zero_division_sell"),
-                tf.zeros(shape=[self.batch_size], dtype=self.tf_dtype) + EPSILON,
+                tf.less_equal(tf.abs(reduce_sum), EPSILON, name="avoid_zero_division_sell"),
+                tf.zeros(shape=[self.batch_size, 1], dtype=self.tf_dtype) + EPSILON,
                 reduce_sum)
             reduce_sum_broadcast = tf.broadcast_to(input=reduce_sum, shape=(self.batch_size, MAX_SHARE),
                                                    name="prob_n_sell_braodacast")
             prob_n = tf.math.divide(masked_A, reduce_sum_broadcast, name="prob_n_sell_divide")
-            # val = tf.log(tf.squeeze(tf.gather(params=tf.squeeze(prob_n), indices=tf.squeeze(n_i), axis=-1)))
+            val = tf.log(tf.batch_gather(prob_n, n_i))
             # opts = []
-            # opts.append(tf.print('A: ', A, '\n',
+            # opts.append(tf.print('exp_A: ', exp_A, '\n',
             #                      'max_share_sell: ', max_share_sell, '\n',
             #                      'mask: ', mask, '\n',
             #                      'reduce_sum: ', reduce_sum, '\n',
-            #                      'prob_n: ', prob_n, '\n',
+            #                      'prob_n: ', prob_n[0,:4], '\n',
             #                      'n_i: ', n_i,'\n',
             #                      'val: ', val, '\n',
-            #                      'is_trade_feedback: ', val_is_trade_feedback,'\n',
+            #                      'is_trade_feedback: ', is_trade_feedback,'\n',
+            #                      'portfolio: ', portfolio, '\n',
             #                      'current_amt: ', current_amt, '\n',
             #                      'v_curr: ', v_curr,'\n',
             #                      '===================='))
