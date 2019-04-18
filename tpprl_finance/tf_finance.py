@@ -1,4 +1,5 @@
 # TODO in read_raw_data, return start_time and T
+# TODO more batch size
 import sys
 import pandas as pd
 import numpy as np
@@ -915,6 +916,7 @@ def read_raw_data(seed):
     # raw = pd.read_csv(SAVE_DIR + "/0_day.csv")
     df = pd.DataFrame(raw)
     print(df.iloc[0:1]["datetime"])
+
     return df  # TODO return T and start_time
 
 

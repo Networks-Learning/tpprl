@@ -1,6 +1,6 @@
 import tensorflow as tf
 
-# import numpy as np
+import numpy as np
 
 MAX_AMT = 1000.0
 MAX_SHARE = 100
@@ -167,7 +167,6 @@ class TPPRExpMarkedCellStacked_finance(tf.contrib.rnn.RNNCell):
         loss = tf.reshape((tf.square(u_theta) - tf.square(u_theta_0)) / (2 * tf.squeeze(self.tf_wt)),
                           shape=[self.batch_size, 1],
                           name="loss_reshape")
-
         # calculate LL for alpha with sigmoid
         prob_0 = tf.nn.sigmoid(
             tf.math.add(tf.einsum('aij,aj->ai', self.tf_Vh_alpha, h_prev, name="einsum_alphai_hi"),
