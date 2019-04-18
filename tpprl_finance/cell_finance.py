@@ -51,10 +51,10 @@ class TPPRExpMarkedCellStacked_finance(tf.contrib.rnn.RNNCell):
 
     def u_theta(self, h, t_delta, v_delta, name):
         vth_val = tf.einsum('aij,aj->ai', self.tf_Vt_h, h, name='Vt_h__h')
-        vtv_val = tf.einsum('ai,ai->ai', self.tf_Vt_v, v_delta, name="Vt_v__v_delta")
+        vtv_val = tf.einsum('aij,aj->ai', self.tf_Vt_v, v_delta, name="Vt_v__v_delta")
         wt_t_delta = tf.einsum('ai,ai->ai', self.tf_wt, t_delta, name="wt__t_delta")
         bias = self.tf_b_lambda
-        c1 = tf.exp(vth_val + vtv_val + bias)
+        # c1 = tf.exp(vth_val + vtv_val + bias)
         # opt = []
         # opt.append(tf.print('vt_h_val:', vth_val, '\n',
         #                     'vtv_val:', vtv_val, '\n',

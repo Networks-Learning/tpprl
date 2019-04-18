@@ -70,3 +70,4 @@ tpprl-log*/
 .mypy_cache/
 .idea/
 my_scripts.py
+tf1_5*
