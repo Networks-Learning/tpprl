@@ -1,10 +1,9 @@
-# TODO in read_raw_data, return start_time and T
-# TODO more batch size
+# TODO avg_gradient_stack has -nan value for wt, vt_h, Vt_v, b_lambda
 import sys
 import pandas as pd
 import numpy as np
 import multiprocessing as MP
-
+from time import time
 np.set_printoptions(precision=6)
 import os
 import tensorflow as tf
@@ -169,7 +168,7 @@ class RLStrategy(Strategy):
             self.curr_price = event.v_curr
             self.last_price = event.v_curr
 
-        # prev_q = self.Q
+        prev_q = self.Q
         if event.is_trade_feedback or self.curr_time is None:
             self.u = self.RS.uniform()
             self.Q = 1
@@ -187,12 +186,16 @@ class RLStrategy(Strategy):
         D = 1 - (self.wt / self.c1) * np.log((1 - self.u) / self.Q)
         a = np.squeeze((1 - self.u) / self.Q)
         assert a < 1
-        assert np.log(D) > 0
+        # assert np.log(D) > 0  #this assert is only valid when wt is +ve. I.e. If wt>0 then log(D)>0, if wt<0 then log(D)<0
 
         self.last_time = event.t_i
-        new_t_i = self.last_time + (1 / self.wt) * np.log(D)
-        new_t_i = np.asarray(new_t_i).squeeze()
-        self.curr_time = new_t_i
+        if D <= 0:
+            # This is the case when no event ever happens.
+            self.curr_time = np.inf
+        else:
+            new_t_i = self.last_time + (1 / self.wt) * np.log(D)
+            new_t_i = np.asarray(new_t_i).squeeze()
+            self.curr_time = new_t_i
         assert self.curr_time >= self.last_time
 
         return self.curr_time
@@ -493,7 +496,7 @@ class ExpRecurrentTrader:
                  Vt_h, Vt_v, b_lambda, Vh_alpha, Vv_alpha, Va_b, Va_s,
                  num_hidden_states, sess, scope, batch_size, learning_rate, clip_norm,
                  summary_dir, save_dir, decay_steps, decay_rate, momentum,
-                 device_cpu, device_gpu, only_cpu, max_events, q):
+                 device_cpu, device_gpu, only_cpu, max_events, q, with_baseline):
         self.summary_dir = summary_dir
         self.save_dir = save_dir
         self.tf_dtype = tf.float32
@@ -804,7 +807,7 @@ class ExpRecurrentTrader:
                                                   for x in self.all_mini_vars}
 
                         self.avg_gradient_stack = []
-                        avg_baseline = 0.0
+                        avg_baseline = tf.reduce_mean(self.tf_batch_rewards, axis=0) + tf.reduce_mean(self.loss_stack, axis=0) if with_baseline else 0.0
                         # Removing the average reward + loss is not optimal baseline,
                         # but still reduces variance significantly.
                         coef = tf.squeeze(self.tf_batch_rewards, axis=-1) + self.loss_stack - avg_baseline
@@ -844,12 +847,15 @@ class ExpRecurrentTrader:
                                     )
                                 )
                             # TODO: write else to show error for dim 4
-
-                        self.clipped_avg_gradients_stack, self.grad_norm_stack = \
-                            tf.clip_by_global_norm(
-                                [grad for grad, _ in self.avg_gradient_stack],
-                                clip_norm=self.clip_norm
-                            )
+                        opts = []
+                        opts.append(tf.print("avg_gradient_stack:", self.avg_gradient_stack,
+                                             "\n==============================="))
+                        with tf.control_dependencies(opts):
+                            self.clipped_avg_gradients_stack, self.grad_norm_stack = \
+                                tf.clip_by_global_norm(
+                                    [grad for grad, _ in self.avg_gradient_stack],
+                                    clip_norm=self.clip_norm
+                                )
 
                         self.clipped_avg_gradient_stack = list(zip(
                             self.clipped_avg_gradients_stack,
@@ -925,19 +931,19 @@ def read_raw_data(RS):
     df = pd.DataFrame(raw)
     start_time = df.iloc[0]['datetime']
     T = df.iloc[-1]['datetime']
-
-    return df, start_time, T  # TODO return T and start_time
+    return df, start_time, T
 
 
 def make_default_trader_opts(seed=42):
     """Make default option set."""
     scope = None
-    decay_steps = 100
+    decay_steps = 10
     decay_rate = 0.001
     num_hidden_states = HIDDEN_LAYER_DIM
-    learning_rate = 0.005
+    learning_rate = 1.0
     clip_norm = 1.0
-    q = 1
+    q = 10.0
+    with_baseline = True
     RS = np.random.RandomState(seed)
     wt = RS.randn(1)
     # wt = np.ones([1,1])
@@ -1004,7 +1010,7 @@ def make_default_trader_opts(seed=42):
     return wt, W_t, Wb_alpha, Ws_alpha, Wn_b, Wn_s, W_h, W_1, W_2, W_3, b_t, b_alpha, bn_b, bn_s, b_h, Vt_h, \
            Vt_v, b_lambda, Vh_alpha, Vv_alpha, Va_b, Va_s, num_hidden_states, scope, learning_rate, \
            clip_norm, summary_dir, save_dir, decay_steps, decay_rate, momentum, device_cpu, device_gpu, only_cpu, \
-           max_events, q
+           max_events, q, with_baseline
 
 
 def get_feed_dict(trader, mgr):
@@ -1239,8 +1245,8 @@ def _simulation_worker(mgr):
     return mgr
 
 
-def train_many(trader, num_iter, init_seed=42, with_MP=False):
-    seed_start = init_seed #+ trader.sess.run(trader.global_step) * trader.batch_size
+def train_many(trader, num_iter, init_seed=42, with_MP=False, q=1.0):  # passing q value so that it can be printed on console
+    seed_start = init_seed  #+ trader.sess.run(trader.global_step) * trader.batch_size
     train_op = trader.sgd_stacked_op
     grad_norm_op = trader.grad_norm_stack
     LL_op = trader.LL_stack
@@ -1251,11 +1257,14 @@ def train_many(trader, num_iter, init_seed=42, with_MP=False):
         for iter_idx in range(num_iter):
             seed_end = seed_start + trader.batch_size
             seeds = range(seed_start, seed_end)
+            str_time = time()  # time() returns time in seconds
             if with_MP:
                 raw_mgr = [create_environment_object(trader=trader, seed=sd) for sd in seeds]
                 simulations = pool.map(_simulation_worker, raw_mgr)
             else:
                 simulations = [run_scenario(trader=trader, seed=sd) for sd in seeds]
+            sim_time = (time()-str_time)/60  # in minutes sim_time measure the time taken by the numpy code(simulation of trades)
+            str_time = time()
             num_events = [sim.get_num_trade_events() for sim in simulations]
             f_d = get_feed_dict(trader=trader, mgr=simulations)
             reward, LL, loss, grad_norm, step, lr, _ = \
@@ -1264,7 +1273,7 @@ def train_many(trader, num_iter, init_seed=42, with_MP=False):
                                trader.global_step, trader.tf_learning_rate,
                                train_op],
                               feed_dict=f_d)
-
+            tf_time = (time() - str_time)/60  # in minutes tf_time measures the time taken to run the tf code
             mean_LL = np.mean(LL)
             std_LL = np.std(LL)
 
@@ -1279,7 +1288,7 @@ def train_many(trader, num_iter, init_seed=42, with_MP=False):
 
             print('* Run {}, LL= {:.5f}±{:.2f}, loss= {:.5f}±{:.2f}, Rwd= {:.5f}±{:.3f}, trade events= {:.2f}±{:.2f}'
                   ' seeds= {}--{}, grad_norm= {:.2f}, step = {}'
-                  ', lr = {:.5f}, wt={:.5f}, b_lambda={:.5f}\n'
+                  ', lr = {:.5f}, wt={:.5f}, b_lambda={:.5f}, q={:.5f}, simulation_time={:.5f}, tf_time={:.5f}\n'
                   .format(iter_idx,
                           mean_LL, std_LL,
                           mean_loss, std_loss,
@@ -1287,7 +1296,9 @@ def train_many(trader, num_iter, init_seed=42, with_MP=False):
                           mean_events, std_events,
                           seed_start, seed_end - 1,
                           grad_norm, step, lr,
-                          trader.sess.run(trader.tf_wt)[0], trader.sess.run(trader.tf_b_lambda)[0]))
+                          trader.sess.run(trader.tf_wt)[0],
+                          trader.sess.run(trader.tf_b_lambda)[0],
+                          q, sim_time, tf_time))
 
             # Ready for the next iter_idx.
             seed_start = seed_end
@@ -1310,7 +1321,7 @@ def test_backprop_code():
     wt, W_t, Wb_alpha, Ws_alpha, Wn_b, Wn_s, W_h, W_1, W_2, W_3, b_t, b_alpha, bn_b, bn_s, b_h, Vt_h, \
     Vt_v, b_lambda, Vh_alpha, Vv_alpha, Va_b, Va_s, num_hidden_states, scope, learning_rate, \
     clip_norm, summary_dir, save_dir, decay_steps, decay_rate, momentum, device_cpu, device_gpu, only_cpu, \
-    max_events, q = make_default_trader_opts()
+    max_events, q, with_baseline = make_default_trader_opts()
     print("default trader initialized..")
 
     config = tf.ConfigProto(
@@ -1329,13 +1340,14 @@ def test_backprop_code():
                                 batch_size=batch_size, learning_rate=learning_rate, clip_norm=clip_norm,
                                 summary_dir=summary_dir,
                                 save_dir=save_dir, decay_steps=decay_steps, decay_rate=decay_rate, momentum=momentum,
-                                device_cpu=device_cpu, device_gpu=device_gpu, only_cpu=only_cpu, max_events=max_events, q=q)
+                                device_cpu=device_cpu, device_gpu=device_gpu, only_cpu=only_cpu, max_events=max_events,
+                                q=q, with_baseline=with_baseline)
 
     trader.initialize()
     print("trader created")
     for epoch in range(epochs):
         print("\nEPOCH: {}".format(epoch))
-        train_many(trader=trader, num_iter=num_iter, with_MP=True)
+        train_many(trader=trader, num_iter=num_iter, with_MP=False, q=q)
         step = trader.sess.run(trader.global_step)
         if step > until:
             print(
