@@ -10,6 +10,7 @@ MAX_AMT = 1000.0
 MAX_SHARE = 100
 BASE_CHARGES = 1.0
 PERCENTAGE_CHARGES = 0.001
+TYPES_OF_PORTFOLIOS = 1
 
 folder = "/NL/tpprl-result/work/rl-finance/"
 # folder = "/home/supriya/MY_HOME/MPI-SWS/dataset/"
@@ -89,8 +90,8 @@ class State:
               "v_curr": event.v_curr,
               "is_trade_feedback": event.is_trade_feedback,
               "event_curr_amt": event.event_curr_amt} for event in self.events])
-        print("\n saving events:")
-        print(df[:2].values)
+        print("\nsaving events:")
+        print("number of events: {}".format(len(df)))
         df.to_csv(folder + output_file, index=False)
         return df
 
@@ -409,17 +410,17 @@ class Environment:
         self.time_gap = time_gap
         self.raw_data = raw_data
         self.agent = agent
-        self.RS = np.random.RandomState(seed)
+        self.tick_data = raw_data
         # for reading market value per minute
-        if self.time_gap == "minute":
-            # TODO need to find a way to group by minute using unix timestamp
-            self.tick_data = self.raw_data.groupby(self.raw_data["datetime"], as_index=False).last()
-        elif self.time_gap == "second":
-            self.tick_data = self.raw_data.groupby(self.raw_data["datetime"], as_index=False).last()
-
-            # print(self.tick_data.head())
-        else:
-            raise ValueError("Time gap value '{}' not understood.".format(self.time_gap))
+        # if self.time_gap == "minute":
+        #     # TODO need to find a way to group by minute using unix timestamp
+        #     self.tick_data = self.raw_data.groupby(self.raw_data["datetime"], as_index=False).last()
+        # elif self.time_gap == "second":
+        #     self.tick_data = self.raw_data.groupby(self.raw_data["datetime"], as_index=False).last()
+        #
+        #     # print(self.tick_data.head())
+        # else:
+        #     raise ValueError("Time gap value '{}' not understood.".format(self.time_gap))
 
     def get_state(self):
         return self.state
@@ -449,60 +450,65 @@ class Environment:
 
                 self.state.apply_event(current_event)
                 v_last = current_event.v_curr
-        print("LL:",self.agent.get_LL())
+        # print("LL:",self.agent.get_LL())
         return v_last
 
 
-def read_raw_data():
+# def read_raw_data():
+#     """ read raw_data """
+#     print("reading raw data")
+#     # folder = "/home/psupriya/MY_HOME/tpprl_finance/dataset/"
+#     # folder = "/home/supriya/MY_HOME/MPI-SWS/dataset"
+#     # folder = "/NL/tpprl-result/work/rl-finance/"
+#     # raw = pd.read_csv(folder + "/hourly_data/0_hour.csv")  # header names=['datetime', 'price'])
+#     raw = pd.read_csv(folder + "/daily_data/0_day.csv")
+#     df = pd.DataFrame(raw)
+#     return df
+
+def read_raw_data(RS):
     """ read raw_data """
-    print("reading raw data")
-    # folder = "/home/psupriya/MY_HOME/tpprl_finance/dataset/"
-    # folder = "/home/supriya/MY_HOME/MPI-SWS/dataset"
-    # folder = "/NL/tpprl-result/work/rl-finance/"
-    # raw = pd.read_csv(folder + "/hourly_data/0_hour.csv")  # header names=['datetime', 'price'])
-    raw = pd.read_csv(folder + "/daily_data/0_day.csv")
+    print("\nreading raw data")
+    total_daily_files = 12752
+    # RS = np.random.RandomState(seed=seed)
+    file_num = RS.choice(a=total_daily_files) # draw sample of size 1 with uniform distribution
+    print("File selected: {}".format(file_num))
+    raw = pd.read_csv(folder + "/per_minute_daily_data/{}_day.csv".format(file_num))
+    # raw = pd.read_csv(SAVE_DIR + "/daily_data/0_day.csv")
+    # raw = pd.read_csv(SAVE_DIR + "/0_day.csv")
     df = pd.DataFrame(raw)
-    return df
+    start_time = df.iloc[0]['datetime']
+    T = df.iloc[-1]['datetime']
+    return df, start_time, T, file_num
+
+
+def run_experiments():
+    seed = 42
+    batch_size = 2
+    seed_start = seed
+    seed_end = seed_start + batch_size
+    seeds = range(seed_start, seed_end)
+    for sd in seeds:
+        RS = np.random.RandomState(seed=sd)  # need seed to select the same datafile
+        raw_data, start_time, T, file_num = read_raw_data(RS)
+        # initiate agent/broadcaster
+        # method = "simple"  # "simple" , "RL"
+        # agent = SimpleStrategy(time_between_trades_secs=5)
+        method = "bollinger"  # "simple" , "RL"
+        agent = BollingerBandStrategy(window=20, num_std=2)
+        # agent = RLStrategy(wt, W_t, Wb_alpha, Ws_alpha, Wn_b, Wn_s, W_h, W_1, W_2, W_3, b_t,
+        #                    b_alpha, bn_b, bn_s, b_h, Vt_h, Vt_v, b_lambda, Vh_alpha, Vv_alpha, Va_b, Va_s, seed)
+        # start time is set to '2009-09-28 09:30:00' i.e. 9:30 am of 28sept2009: 1254130200
+        # max time T is set to '2009-09-28 16:00:00' i.e. same day 4pm: 1254153600
+        mgr = Environment(T=T, time_gap="second", raw_data=raw_data, agent=agent, start_time=start_time, seed=seed)
+        v_last = mgr.simulator()
+
+        output_file = "/results_{}_strategy/output_event_{}_{}_day.csv".format(method, method, file_num)
+        event_df = mgr.get_state().get_dataframe(output_file)
+        reward = reward_fn(events=event_df, v_last=v_last)
+        print("reward = ", reward)
+        # with open(folder+"/results_{}_strategy/reward_{}_day.txt".format(method, file_num), "w") as rwd:
+        #     rwd.write("reward:{}".format(reward))
 
 
 if __name__ == '__main__':
-    raw_data = read_raw_data()
-    seed = 42
-    wt = np.random.uniform(size=(1, 1))
-    W_t = np.zeros((8, 1))
-    Wb_alpha = np.zeros((8, 1))
-    Ws_alpha = np.zeros((8, 1))
-    Wn_b = np.zeros((8, 1))
-    Wn_s = np.zeros((8, 1))
-    W_h = np.zeros((8, 8))
-    W_1 = np.zeros((8, 8))
-    W_2 = np.zeros((8, 8))
-    W_3 = np.zeros((8, 8))
-    b_t = np.zeros((8, 1))
-    b_alpha = np.zeros((8, 1))
-    bn_b = np.zeros((8, 1))
-    bn_s = np.zeros((8, 1))
-    b_h = np.zeros((8, 1))
-    Vt_h = np.zeros((1, 8))
-    Vt_v = np.zeros((1, 1))
-    b_lambda = np.zeros((1, 1))
-    Vh_alpha = np.zeros((2, 8))
-    Vv_alpha = np.zeros((2, 1))
-    Va_b = np.zeros((100, 8))
-    Va_s = np.zeros((100, 8))
-    # initiate agent/broadcaster
-    # agent = SimpleStrategy(time_between_trades_secs=5)
-    agent = BollingerBandStrategy(window=20, num_std=2)
-    # agent = RLStrategy(wt, W_t, Wb_alpha, Ws_alpha, Wn_b, Wn_s, W_h, W_1, W_2, W_3, b_t,
-    #                    b_alpha, bn_b, bn_s, b_h, Vt_h, Vt_v, b_lambda, Vh_alpha, Vv_alpha, Va_b, Va_s, seed)
-    # start time is set to '2009-09-28 09:30:00' i.e. 9:30 am of 28sept2009: 1254130200
-    # max time T is set to '2009-09-28 16:00:00' i.e. same day 4pm: 1254153600
-    mgr = Environment(T=1254133800, time_gap="second", raw_data=raw_data, agent=agent, start_time=1254130200, seed=seed)
-    v_last = mgr.simulator()
-    method = "RL"
-    output_file = "/results_{}_strategy/output_event_{}_0_day.csv".format(method, method)
-    event_df = mgr.get_state().get_dataframe(output_file)
-    reward = reward_fn(events=event_df, v_last=v_last)
-    print("reward = ", reward)
-    with open(folder+"/results_{}_strategy/reward_0_day.txt".format(method), "w") as rwd:
-        rwd.write("reward:{}".format(reward))
+    run_experiments()
