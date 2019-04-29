@@ -6,12 +6,13 @@ import multiprocessing as MP
 from time import time
 np.set_printoptions(precision=6)
 import os
+from datetime import datetime
 import tensorflow as tf
 
 from util_finance import _now, variable_summaries
 from cell_finance import TPPRExpMarkedCellStacked_finance
 
-SAVE_DIR = "/NL/tpprl-result/work/rl-finance/"
+SAVE_DIR = "/NL/tpprl-result/work/rl-finance"
 # SAVE_DIR = "/home/supriya/MY_HOME/MPI-SWS/dataset"
 HIDDEN_LAYER_DIM = 8
 MAX_AMT = 1000.0
@@ -847,15 +848,15 @@ class ExpRecurrentTrader:
                                     )
                                 )
                             # TODO: write else to show error for dim 4
-                        opts = []
-                        opts.append(tf.print("avg_gradient_stack:", self.avg_gradient_stack,
-                                             "\n==============================="))
-                        with tf.control_dependencies(opts):
-                            self.clipped_avg_gradients_stack, self.grad_norm_stack = \
-                                tf.clip_by_global_norm(
-                                    [grad for grad, _ in self.avg_gradient_stack],
-                                    clip_norm=self.clip_norm
-                                )
+                        #opts = []
+                        #opts.append(tf.print("avg_gradient_stack:", self.avg_gradient_stack,
+                        #                     "\n==============================="))
+                        #with tf.control_dependencies(opts):
+                        self.clipped_avg_gradients_stack, self.grad_norm_stack = \
+                            tf.clip_by_global_norm(
+                                [grad for grad, _ in self.avg_gradient_stack],
+                                clip_norm=self.clip_norm
+                            )
 
                         self.clipped_avg_gradient_stack = list(zip(
                             self.clipped_avg_gradients_stack,
@@ -888,24 +889,24 @@ class ExpRecurrentTrader:
                     max_to_keep=1000
                 )
 
-                # with tf.device(device_cpu):
-                #     tf.contrib.training.add_gradients_summaries(self.avg_gradient_stack)
-                #
-                #     for v in self.all_tf_vars:
-                #         variable_summaries(v)
-                #
-                #     variable_summaries(self.tf_learning_rate, name='learning_rate')
-                #     variable_summaries(self.loss_stack, name='loss_stack')
-                #     variable_summaries(self.LL_stack, name='LL_stack')
-                #     variable_summaries(self.loss_last_term_stack, name='loss_last_term_stack')
-                #     variable_summaries(self.LL_last_term_stack, name='LL_last_term_stack')
-                #     variable_summaries(self.h_states_stack, name='hidden_states_stack')
-                #     variable_summaries(self.LL_log_terms_stack, name='LL_log_terms_stack')
-                #     variable_summaries(self.LL_int_terms_stack, name='LL_int_terms_stack')
-                #     variable_summaries(self.loss_terms_stack, name='loss_terms_stack')
-                #     variable_summaries(tf.cast(self.tf_batch_seq_len, self.tf_dtype), name='batch_seq_len')
-                #
-                #     self.tf_merged_summaries = tf.summary.merge_all()
+                with tf.device(device_cpu):
+                    tf.contrib.training.add_gradients_summaries(self.avg_gradient_stack)
+
+                    for v in self.all_tf_vars:
+                        variable_summaries(v)
+
+                    variable_summaries(self.tf_learning_rate, name='learning_rate')
+                    variable_summaries(self.loss_stack, name='loss_stack')
+                    variable_summaries(self.LL_stack, name='LL_stack')
+                    variable_summaries(self.loss_last_term_stack, name='loss_last_term_stack')
+                    variable_summaries(self.LL_last_term_stack, name='LL_last_term_stack')
+                    variable_summaries(self.h_states_stack, name='hidden_states_stack')
+                    variable_summaries(self.LL_log_terms_stack, name='LL_log_terms_stack')
+                    variable_summaries(self.LL_int_terms_stack, name='LL_int_terms_stack')
+                    variable_summaries(self.loss_terms_stack, name='loss_terms_stack')
+                    variable_summaries(tf.cast(self.tf_batch_seq_len, self.tf_dtype), name='batch_seq_len')
+
+                    self.tf_merged_summaries = tf.summary.merge_all()
 
     def initialize(self, finalize=True):
         """Initialize the graph."""
@@ -940,7 +941,7 @@ def make_default_trader_opts(seed=42):
     decay_steps = 10
     decay_rate = 0.001
     num_hidden_states = HIDDEN_LAYER_DIM
-    learning_rate = 1.0
+    learning_rate = 0.001
     clip_norm = 1.0
     q = 10.0
     with_baseline = True
@@ -1004,9 +1005,14 @@ def make_default_trader_opts(seed=42):
     device_cpu = '/cpu:0'
     device_gpu = '/gpu:0'
     only_cpu = False
-    save_dir = SAVE_DIR + "/results_TF_RL/"
+    dt = datetime.now()
+    save_dir = SAVE_DIR + "/results_TF_RL/run_{}{}{}_{}hr{}min{}sec".format(dt.day, dt.strftime("%B"), dt.year, dt.hour, dt.minute, dt.second)
+
+    if not os.path.exists(save_dir):
+        os.makedirs(save_dir)
     # Expected: './tpprl.summary/train-{}/'.format(run)
     summary_dir = save_dir + "/summary_dir/"
+    print("saving summaries and checkpoints in {}".format(save_dir))
     return wt, W_t, Wb_alpha, Ws_alpha, Wn_b, Wn_s, W_h, W_1, W_2, W_3, b_t, b_alpha, bn_b, bn_s, b_h, Vt_h, \
            Vt_v, b_lambda, Vh_alpha, Vv_alpha, Va_b, Va_s, num_hidden_states, scope, learning_rate, \
            clip_norm, summary_dir, save_dir, decay_steps, decay_rate, momentum, device_cpu, device_gpu, only_cpu, \
@@ -1245,12 +1251,22 @@ def _simulation_worker(mgr):
     return mgr
 
 
-def train_many(trader, num_iter, init_seed=42, with_MP=False, q=1.0):  # passing q value so that it can be printed on console
-    seed_start = init_seed  #+ trader.sess.run(trader.global_step) * trader.batch_size
+def train_many(trader, num_iter, init_seed=42, with_MP=False, q=1.0, save_every=5, with_summaries=True, curr_epoch=None):  # passing q value so that it can be printed on console
+    seed_start = init_seed  # + trader.sess.run(trader.global_step) * trader.batch_size
+
+    if with_summaries:
+        assert trader.summary_dir is not None
+        os.makedirs(trader.summary_dir, exist_ok=True)
+        train_writer = tf.summary.FileWriter(trader.summary_dir,
+                                             trader.sess.graph)
+        print("summary writer created.")
+
     train_op = trader.sgd_stacked_op
     grad_norm_op = trader.grad_norm_stack
     LL_op = trader.LL_stack
     loss_op = trader.loss_stack
+    chkpt_file = os.path.join(trader.save_dir, 'tpprl.ckpt')
+    pool = None
     try:
         if with_MP:
             pool = MP.Pool()
@@ -1267,12 +1283,23 @@ def train_many(trader, num_iter, init_seed=42, with_MP=False, q=1.0):  # passing
             str_time = time()
             num_events = [sim.get_num_trade_events() for sim in simulations]
             f_d = get_feed_dict(trader=trader, mgr=simulations)
-            reward, LL, loss, grad_norm, step, lr, _ = \
-                trader.sess.run([trader.tf_batch_rewards, LL_op, loss_op,
-                               grad_norm_op,
-                               trader.global_step, trader.tf_learning_rate,
-                               train_op],
-                              feed_dict=f_d)
+
+            if with_summaries:
+                reward, LL, loss, grad_norm, summaries, step, lr, _ = \
+                    trader.sess.run([trader.tf_batch_rewards, LL_op, loss_op,
+                                   grad_norm_op,
+                                   trader.tf_merged_summaries,
+                                   trader.global_step, trader.tf_learning_rate,
+                                   train_op],
+                                  feed_dict=f_d)
+                train_writer.add_summary(summaries, step)
+            else:
+                reward, LL, loss, grad_norm, step, lr, _ = \
+                    trader.sess.run([trader.tf_batch_rewards, LL_op, loss_op,
+                                   grad_norm_op,
+                                   trader.global_step, trader.tf_learning_rate,
+                                   train_op],
+                                  feed_dict=f_d)
             tf_time = (time() - str_time)/60  # in minutes tf_time measures the time taken to run the tf code
             mean_LL = np.mean(LL)
             std_LL = np.std(LL)
@@ -1303,20 +1330,24 @@ def train_many(trader, num_iter, init_seed=42, with_MP=False, q=1.0):  # passing
             # Ready for the next iter_idx.
             seed_start = seed_end
 
-            # if iter_idx % save_every == 0:
-            #     print('Saving model!')
-            #     self.saver.save(self.sess,
-            #                     chkpt_file,
-            #                     global_step=self.global_step, )
+        if curr_epoch % save_every == 0:
+            print('Saving model at epoch:{}, global_step:{}'.format(curr_epoch, step))
+            trader.saver.save(trader.sess,
+                            chkpt_file,
+                            global_step=trader.global_step, )
     finally:
-        print("TODO: saving model")
+        if pool is not None:
+            pool.close()
+
+        if with_summaries:
+            train_writer.flush()
 
 
 def test_backprop_code():
-    epochs = 50
-    until = 50
-    num_iter = 1  # number of files to be considered
-    batch_size = 2
+    epochs = 100
+    # until = epochs
+    num_iter = 797  # number of files to be considered
+    batch_size = 16
 
     wt, W_t, Wb_alpha, Ws_alpha, Wn_b, Wn_s, W_h, W_1, W_2, W_3, b_t, b_alpha, bn_b, bn_s, b_h, Vt_h, \
     Vt_v, b_lambda, Vh_alpha, Vv_alpha, Va_b, Va_s, num_hidden_states, scope, learning_rate, \
@@ -1347,13 +1378,17 @@ def test_backprop_code():
     print("trader created")
     for epoch in range(epochs):
         print("\nEPOCH: {}".format(epoch))
-        train_many(trader=trader, num_iter=num_iter, with_MP=False, q=q)
+        train_many(trader=trader, num_iter=num_iter, with_MP=False, q=q, curr_epoch=epoch)
         step = trader.sess.run(trader.global_step)
-        if step > until:
-            print(
-                'Have already run {} > {} iterations, not going further.'.format(step, until)
-            )
-            break
+        # if step > until:
+        #     print(
+        #         'Have already run {} > {} iterations, not going further.'.format(step, until)
+        #     )
+        #     break
+    chkpt_file = os.path.join(trader.save_dir, 'tpprl.ckpt')
+    print('Saving model at global_step:{}'.format(step))
+    trader.saver.save(trader.sess, chkpt_file, global_step=trader.global_step, )
+    print("saved summaries and checkpoints in: {}".format(save_dir))
 
 
 if __name__ == '__main__':
