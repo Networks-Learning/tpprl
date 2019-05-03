@@ -20,7 +20,7 @@ folder = "/NL/tpprl-result/work/rl-finance/"
 def reward_fn(events, v_last):
     reward = MAX_AMT
     owned_shares = 0
-    print("calculating reward...")
+    # print("calculating reward...")
     for (_idx, event) in events.iterrows():
         if event.alpha_i == 0:
             reward -= event.n_i * event.v_curr
@@ -90,9 +90,10 @@ class State:
               "v_curr": event.v_curr,
               "is_trade_feedback": event.is_trade_feedback,
               "event_curr_amt": event.event_curr_amt} for event in self.events])
-        print("\nsaving events:")
-        print("number of events: {}".format(len(df)))
-        df.to_csv(folder + output_file, index=False)
+        # print("\nsaving events:")
+        # print("number of events: {}".format(len(df)))
+        # saving all events
+        # df.to_csv(folder + output_file, index=False)
         return df
 
 
@@ -126,7 +127,7 @@ class SimpleStrategy(Strategy):
         self.own_events = 1
         self.time_between_trades_secs = time_between_trades_secs
         self.last_action = None
-        print("Using Simple Strategy")
+        # print("Using Simple Strategy")
 
     def get_next_action_time(self, event):
         if self.current_amt <= (event.v_curr + BASE_CHARGES + event.v_curr * PERCENTAGE_CHARGES):
@@ -170,7 +171,7 @@ class BollingerBandStrategy(Strategy):
         self.num_std = num_std
         self.history = deque(maxlen=self.window)
         self.bollinger_band = None
-        print("Using Bollinger Band Strategy")
+        # print("Using Bollinger Band Strategy")
 
     def get_next_action_time(self, event):
         if event.is_trade_event():
@@ -430,7 +431,7 @@ class Environment:
         first_tick = next(row_iterator)[1]
         current_event = TickFeedback(t_i=first_tick.datetime, v_curr=first_tick.price, event_curr_amt = self.agent.current_amt)
         v_last = current_event.v_curr
-        print("trading..")
+        # print("trading..")
 
         for (_idx, next_tick) in row_iterator:
             while self.state.time <= self.T:
@@ -465,13 +466,31 @@ class Environment:
 #     df = pd.DataFrame(raw)
 #     return df
 
-def read_raw_data(RS):
+# def read_raw_data(RS):
+#     """ read raw_data """
+#     print("\nreading raw data")
+#     total_daily_files = 12752
+#     # RS = np.random.RandomState(seed=seed)
+#     file_num = RS.choice(a=total_daily_files) # draw sample of size 1 with uniform distribution
+#     print("File selected: {}".format(file_num))
+#     raw = pd.read_csv(folder + "/per_minute_daily_data/{}_day.csv".format(file_num))
+#     # raw = pd.read_csv(SAVE_DIR + "/daily_data/0_day.csv")
+#     # raw = pd.read_csv(SAVE_DIR + "/0_day.csv")
+#     df = pd.DataFrame(raw)
+#     start_time = df.iloc[0]['datetime']
+#     T = df.iloc[-1]['datetime']
+#     return df, start_time, T, file_num
+
+
+def read_raw_data(RS, start_num, end_num):
     """ read raw_data """
-    print("\nreading raw data")
-    total_daily_files = 12752
+    # print("\nreading raw data")
+    # total_daily_files = 12752
     # RS = np.random.RandomState(seed=seed)
-    file_num = RS.choice(a=total_daily_files) # draw sample of size 1 with uniform distribution
-    print("File selected: {}".format(file_num))
+    # file_num = RS.choice(a=total_daily_files) # draw sample of size 1 with uniform distribution
+    file_num_list = np.arange(start_num, end_num + 1)
+    file_num = RS.choice(a=file_num_list, size=1)[0]  # returns the array of size one, hence used [0] at end to access the element
+    # print("File selected: {}".format(file_num), end=",")
     raw = pd.read_csv(folder + "/per_minute_daily_data/{}_day.csv".format(file_num))
     # raw = pd.read_csv(SAVE_DIR + "/daily_data/0_day.csv")
     # raw = pd.read_csv(SAVE_DIR + "/0_day.csv")
@@ -483,31 +502,60 @@ def read_raw_data(RS):
 
 def run_experiments():
     seed = 42
-    batch_size = 2
-    seed_start = seed
-    seed_end = seed_start + batch_size
-    seeds = range(seed_start, seed_end)
-    for sd in seeds:
-        RS = np.random.RandomState(seed=sd)  # need seed to select the same datafile
-        raw_data, start_time, T, file_num = read_raw_data(RS)
-        # initiate agent/broadcaster
-        # method = "simple"  # "simple" , "RL"
-        # agent = SimpleStrategy(time_between_trades_secs=5)
-        method = "bollinger"  # "simple" , "RL"
-        agent = BollingerBandStrategy(window=20, num_std=2)
-        # agent = RLStrategy(wt, W_t, Wb_alpha, Ws_alpha, Wn_b, Wn_s, W_h, W_1, W_2, W_3, b_t,
-        #                    b_alpha, bn_b, bn_s, b_h, Vt_h, Vt_v, b_lambda, Vh_alpha, Vv_alpha, Va_b, Va_s, seed)
-        # start time is set to '2009-09-28 09:30:00' i.e. 9:30 am of 28sept2009: 1254130200
-        # max time T is set to '2009-09-28 16:00:00' i.e. same day 4pm: 1254153600
-        mgr = Environment(T=T, time_gap="second", raw_data=raw_data, agent=agent, start_time=start_time, seed=seed)
-        v_last = mgr.simulator()
+    batch_size = 32
 
-        output_file = "/results_{}_strategy/output_event_{}_{}_day.csv".format(method, method, file_num)
-        event_df = mgr.get_state().get_dataframe(output_file)
-        reward = reward_fn(events=event_df, v_last=v_last)
-        print("reward = ", reward)
-        # with open(folder+"/results_{}_strategy/reward_{}_day.txt".format(method, file_num), "w") as rwd:
-        #     rwd.write("reward:{}".format(reward))
+    val_start_num = 8926  # 8926
+    val_end_num = 11475
+    val_num_iter = 5
+    method = "simple"  # "simple"
+    seed_start = seed
+    print("using strategy:{}".format(method))
+    for iter_idx in range(val_num_iter):
+        seed_end = seed_start + batch_size
+        seeds = list(range(seed_start, seed_end))
+        batch_files_selected = []
+        batch_reward = []
+        batch_trade_events = []
+        for sd in seeds:
+            RS = np.random.RandomState(seed=sd)  # need seed to select the same datafile
+            raw_data, start_time, T, file_num = read_raw_data(RS, start_num=val_start_num, end_num=val_end_num)
+            batch_files_selected.append(file_num)
+            # initiate agent/broadcaster
+            if "simple" in method:
+                agent = SimpleStrategy(time_between_trades_secs=5)
+            elif "bollinger" in method:
+                agent = BollingerBandStrategy(window=20, num_std=2)
+            else:
+                raise ValueError("trading strategy name not understood:{}".format(method))
+            mgr = Environment(T=T, time_gap="second", raw_data=raw_data, agent=agent, start_time=start_time, seed=seed)
+            v_last = mgr.simulator()
+
+            output_file = "/results_{}_strategy/output_event_{}_{}_day.csv".format(method, method, file_num)
+            event_df = mgr.get_state().get_dataframe(output_file)  # TODO: return length of trade events
+
+            row_iterator = event_df.iterrows()
+            count_trade = 0
+            for (_, row) in row_iterator:
+                if row.is_trade_feedback:
+                    count_trade += 1
+            batch_trade_events.append(count_trade)
+
+            reward = reward_fn(events=event_df, v_last=v_last)
+            batch_reward.append(reward)
+
+        print("\n----\nFiles selected:")
+        for file in batch_files_selected:
+            print(file, end=',')
+        avg_reward = np.mean(np.array(batch_reward))
+        std_reward = np.std(np.array(batch_reward))
+
+        avg_trade_events = np.mean(np.array(batch_trade_events))
+        std_trade_events = np.std(np.array(batch_trade_events))
+        print("\n\nBatch:{}, Reward: {}±{}, seeds:{}--{}, trade_events: {}±{}".format(
+            iter_idx, avg_reward, std_reward, seed_start, seed_end-1, avg_trade_events, std_trade_events))
+
+        # Ready for the next iter_idx.
+        seed_start = seed_end
 
 
 if __name__ == '__main__':
