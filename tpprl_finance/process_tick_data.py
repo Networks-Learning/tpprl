@@ -93,7 +93,7 @@ class State:
         # print("\nsaving events:")
         # print("number of events: {}".format(len(df)))
         # saving all events
-        # df.to_csv(folder + output_file, index=False)
+        df.to_csv(folder + output_file, index=False)
         return df
 
 
@@ -506,56 +506,64 @@ def run_experiments():
 
     val_start_num = 8926  # 8926
     val_end_num = 11475
-    val_num_iter = 5
-    method = "simple"  # "simple"
+    val_num_iter = 80
+    method = "bollinger"  # "simple", "bollinger"
     seed_start = seed
-    print("using strategy:{}".format(method))
-    for iter_idx in range(val_num_iter):
-        seed_end = seed_start + batch_size
-        seeds = list(range(seed_start, seed_end))
-        batch_files_selected = []
-        batch_reward = []
-        batch_trade_events = []
-        for sd in seeds:
-            RS = np.random.RandomState(seed=sd)  # need seed to select the same datafile
-            raw_data, start_time, T, file_num = read_raw_data(RS, start_num=val_start_num, end_num=val_end_num)
-            batch_files_selected.append(file_num)
-            # initiate agent/broadcaster
-            if "simple" in method:
-                agent = SimpleStrategy(time_between_trades_secs=5)
-            elif "bollinger" in method:
-                agent = BollingerBandStrategy(window=20, num_std=2)
-            else:
-                raise ValueError("trading strategy name not understood:{}".format(method))
-            mgr = Environment(T=T, time_gap="second", raw_data=raw_data, agent=agent, start_time=start_time, seed=seed)
-            v_last = mgr.simulator()
+    with open(folder+"/results_{}_strategy/output.txt".format(method), 'w') as outFile, \
+            open(folder+"/results_{}_strategy/files_selected.txt".format(method), 'w') as save_files:
+        print("using strategy:{}".format(method))
+        outFile.write("using strategy:{}\n".format(method))
+        for iter_idx in range(val_num_iter):
+            seed_end = seed_start + batch_size
+            seeds = list(range(seed_start, seed_end))
+            batch_files_selected = []
+            batch_reward = []
+            batch_trade_events = []
+            for sd in seeds:
+                RS = np.random.RandomState(seed=sd)  # need seed to select the same datafile
+                raw_data, start_time, T, file_num = read_raw_data(RS, start_num=val_start_num, end_num=val_end_num)
+                batch_files_selected.append(file_num)
+                # initiate agent/broadcaster
+                if "simple" in method:
+                    agent = SimpleStrategy(time_between_trades_secs=5)
+                elif "bollinger" in method:
+                    agent = BollingerBandStrategy(window=20, num_std=2)
+                else:
+                    raise ValueError("trading strategy name not understood:{}".format(method))
+                mgr = Environment(T=T, time_gap="second", raw_data=raw_data, agent=agent, start_time=start_time, seed=seed)
+                v_last = mgr.simulator()
 
-            output_file = "/results_{}_strategy/output_event_{}_{}_day.csv".format(method, method, file_num)
-            event_df = mgr.get_state().get_dataframe(output_file)  # TODO: return length of trade events
+                output_file = "/results_{}_strategy/event_{}_{}_day.csv".format(method, method, file_num)
+                event_df = mgr.get_state().get_dataframe(output_file)  # TODO: return length of trade events
 
-            row_iterator = event_df.iterrows()
-            count_trade = 0
-            for (_, row) in row_iterator:
-                if row.is_trade_feedback:
-                    count_trade += 1
-            batch_trade_events.append(count_trade)
+                row_iterator = event_df.iterrows()
+                count_trade = 0
+                for (_, row) in row_iterator:
+                    if row.is_trade_feedback:
+                        count_trade += 1
+                batch_trade_events.append(count_trade)
 
-            reward = reward_fn(events=event_df, v_last=v_last)
-            batch_reward.append(reward)
+                reward = reward_fn(events=event_df, v_last=v_last)
+                batch_reward.append(reward)
 
-        print("\n----\nFiles selected:")
-        for file in batch_files_selected:
-            print(file, end=',')
-        avg_reward = np.mean(np.array(batch_reward))
-        std_reward = np.std(np.array(batch_reward))
+            print("\n----\nFiles selected:")
+            outFile.write("\n----\nFiles selected:\n")
+            for file in batch_files_selected:
+                print(file, end=',')
+                outFile.write("{},".format(file))
+                save_files.write("{}\n".format(file))
+            outFile.write("\n")
+            avg_reward = np.mean(np.array(batch_reward))
+            std_reward = np.std(np.array(batch_reward))
 
-        avg_trade_events = np.mean(np.array(batch_trade_events))
-        std_trade_events = np.std(np.array(batch_trade_events))
-        print("\n\nBatch:{}, Reward: {}±{}, seeds:{}--{}, trade_events: {}±{}".format(
-            iter_idx, avg_reward, std_reward, seed_start, seed_end-1, avg_trade_events, std_trade_events))
-
-        # Ready for the next iter_idx.
-        seed_start = seed_end
+            avg_trade_events = np.mean(np.array(batch_trade_events))
+            std_trade_events = np.std(np.array(batch_trade_events))
+            print("\n\nBatch:{}, Reward: {}±{}, seeds:{}--{}, trade_events: {}±{}".format(
+                iter_idx, avg_reward, std_reward, seed_start, seed_end-1, avg_trade_events, std_trade_events))
+            outFile.write("\n\nBatch:{}, Reward: {}±{}, seeds:{}--{}, trade_events: {}±{}\n".format(
+                iter_idx, avg_reward, std_reward, seed_start, seed_end-1, avg_trade_events, std_trade_events))
+            # Ready for the next iter_idx.
+            seed_start = seed_end
 
 
 if __name__ == '__main__':
