@@ -1,4 +1,4 @@
-# TODO avg_gradient_stack has -nan value for wt, vt_h, Vt_v, b_lambda
+# TODO save event data to csv file so that it can be plotted on graph
 import sys
 import pandas as pd
 import numpy as np
@@ -9,12 +9,13 @@ np.set_printoptions(precision=6)
 import os
 from datetime import datetime
 import tensorflow as tf
+from itertools import repeat
 
 from util_finance import _now, variable_summaries
 from cell_finance import TPPRExpMarkedCellStacked_finance
 
 SAVE_DIR = "/NL/tpprl-result/work/rl-finance"
-
+SIMULATION_SAVE_DIR = None
 # SAVE_DIR = "/home/supriya/MY_HOME/MPI-SWS/dataset"
 HIDDEN_LAYER_DIM = 8
 MAX_AMT = 1000.0
@@ -380,6 +381,7 @@ class Environment:
     def __init__(self, T, time_gap, raw_data, agent, start_time, RS):
         self.T = T
         # self.state = State(curr_time=start_time)
+        self.list_t_i = []  # list of time of read/trade
         self.list_t_delta = []  # list of time delta
         self.list_alpha_i = []  # list of alpha_i's
         self.list_n_i = []  # list of n_i's
@@ -409,6 +411,7 @@ class Environment:
     # def get_state(self):
     #     return self.state
     def apply_event(self, event):
+        self.list_t_i.append(event.t_i)
         self.list_t_delta.append(event.t_i - self.agent.last_time)
         self.list_alpha_i.append(event.alpha_i)
         self.list_n_i.append(event.n_i)
@@ -491,6 +494,22 @@ class Environment:
             if event == 1:
                 count += 1
         return count
+
+    def save_simulation(self, file_num, epoch):
+        df = pd.DataFrame(columns=["t_i", "alpha_i", "n_i", "v_curr", "is_trade_feedback", "event_curr_amt"])
+        for idx in list(range(self.get_num_events())):
+            # save only trade events in which number of shares bought/sold are not zero (not saving empty trades)
+            if self.list_is_trade_feedback[idx] == 1.0 and self.list_n_i[idx] != 0.0:
+                df = df.append({"t_i": self.list_t_i[idx],
+                                "alpha_i": self.list_alpha_i[idx],
+                                "n_i": self.list_n_i[idx],
+                                "v_curr": self.list_v_curr[idx][0],
+                                "is_trade_feedback": self.list_is_trade_feedback[idx],
+                                "event_curr_amt": self.list_current_amount[idx][0]},
+                               ignore_index=True)
+
+        # TODO: create folder sim_dir if not present
+        df.to_csv(SIMULATION_SAVE_DIR + "/{}_epoch_{}_day.csv".format(epoch, file_num), index=False)
 
 
 class ExpRecurrentTrader:
@@ -929,7 +948,8 @@ def read_raw_data(RS, start_num, end_num):
     # RS = np.random.RandomState(seed=seed)
     # file_num = RS.choice(a=total_daily_files) # draw sample of size 1 with uniform distribution
     file_num_list = np.arange(start_num, end_num + 1)
-    file_num = RS.choice(a=file_num_list, size=1)[0]  # returns the array of size one, hence used [0] at end to access the element
+    file_num = RS.choice(a=file_num_list, size=1)[
+        0]  # returns the array of size one, hence used [0] at end to access the element
     print("File selected: {}".format(file_num), end=",")
     raw = pd.read_csv(SAVE_DIR + "/per_minute_daily_data/{}_day.csv".format(file_num))
     # raw = pd.read_csv(SAVE_DIR + "/daily_data/0_day.csv")
@@ -937,13 +957,13 @@ def read_raw_data(RS, start_num, end_num):
     df = pd.DataFrame(raw)
     start_time = df.iloc[0]['datetime']
     T = df.iloc[-1]['datetime']
-    return df, start_time, T
+    return df, start_time, T, file_num
 
 
 def make_default_trader_opts(seed=42):
     """Make default option set."""
     scope = None
-    decay_steps = 10
+    decay_steps = 100
     decay_rate = 0.001
     num_hidden_states = HIDDEN_LAYER_DIM
     learning_rate = 0.001
@@ -1011,13 +1031,20 @@ def make_default_trader_opts(seed=42):
     device_gpu = '/gpu:0'
     only_cpu = False
     dt = datetime.now()
+    # create folder to save model summaries and checkpoints
     save_dir = SAVE_DIR + "/results_TF_RL/run_{}{}{}_{}hr{}min{}sec".format(dt.day, dt.strftime("%B"), dt.year, dt.hour,
                                                                             dt.minute, dt.second)
     if not os.path.exists(save_dir):
         os.makedirs(save_dir)
-    # Expected: './tpprl.summary/train-{}/'.format(run)
+
+    # create folder to save validation simulations
+    global SIMULATION_SAVE_DIR
+    SIMULATION_SAVE_DIR = save_dir + "/val_simulations"
+    if not os.path.exists(SIMULATION_SAVE_DIR):
+        os.makedirs(SIMULATION_SAVE_DIR)
+
     summary_dir = save_dir + "/summary_dir/"
-    print("saving summaries and checkpoints in {}".format(save_dir))
+    print("saving summaries and checkpoints in {}\n".format(save_dir))
     return wt, W_t, Wb_alpha, Ws_alpha, Wn_b, Wn_s, W_h, W_1, W_2, W_3, b_t, b_alpha, bn_b, bn_s, b_h, Vt_h, \
            Vt_v, b_lambda, Vh_alpha, Vv_alpha, Va_b, Va_s, num_hidden_states, scope, learning_rate, \
            clip_norm, summary_dir, save_dir, decay_steps, decay_rate, momentum, device_cpu, device_gpu, only_cpu, \
@@ -1078,11 +1105,11 @@ def get_feed_dict(trader, mgr):
     }
 
 
-def run_scenario(trader, seed, start_num, end_num):
+def run_scenario(trader, seed, start_num, end_num, epoch):
     # use seed to select the trade data file
     RS = np.random.RandomState(seed=seed)
 
-    raw_data, start_time, T = read_raw_data(RS=RS, start_num=start_num, end_num=end_num)
+    raw_data, start_time, T, file_num = read_raw_data(RS=RS, start_num=start_num, end_num=end_num)
 
     wt = trader.sess.run(trader.tf_wt)
     W_t = trader.sess.run(trader.tf_W_t)
@@ -1115,7 +1142,10 @@ def run_scenario(trader, seed, start_num, end_num):
     # max time T is set to '2009-09-28 16:00:00' i.e. same day 4pm: 1254153600
     mgr = Environment(T=T, time_gap="second", raw_data=raw_data, agent=agent, start_time=start_time, RS=RS)
     mgr.simulator()
+    if start_num == 8926:  # save simulations only if it is validation data
+        mgr.save_simulation(file_num=file_num, epoch=epoch)
     return mgr
+
 
 #
 # def test_run_scenario():
@@ -1215,10 +1245,10 @@ def run_scenario(trader, seed, start_num, end_num):
 
 
 # backprop code
-def create_environment_object(trader, seed, start_num, end_num):
+def create_environment_object(trader, seed, start_num, end_num, epoch):
     RS = np.random.RandomState(seed=seed)
 
-    raw_data, start_time, T = read_raw_data(RS=RS, start_num=start_num, end_num=end_num)
+    raw_data, start_time, T, file_num = read_raw_data(RS=RS, start_num=start_num, end_num=end_num)
 
     wt = trader.sess.run(trader.tf_wt)
     W_t = trader.sess.run(trader.tf_W_t)
@@ -1250,11 +1280,13 @@ def create_environment_object(trader, seed, start_num, end_num):
     # start time is set to '2009-09-28 09:30:00' i.e. 9:30 am of 28sept2009: 1254130200
     # max time T is set to '2009-09-28 16:00:00' i.e. same day 4pm: 1254153600
     mgr = Environment(T=T, time_gap="second", raw_data=raw_data, agent=agent, start_time=start_time, RS=RS)
-    return mgr
+    return mgr, start_num, file_num, epoch
 
 
-def _simulation_worker(mgr):
+def _simulation_worker(mgr, start_num, file_num, epoch):
     mgr.simulator()
+    if start_num == 8926:  # save simulations only if it is validation data
+        mgr.save_simulation(file_num=file_num, epoch=epoch)
     return mgr
 
 
@@ -1284,21 +1316,26 @@ def train_many(trader, num_iter, init_seed=42, with_MP=False, q=1.0, save_every=
         if with_MP:
             pool = MP.Pool()
         for iter_idx in range(num_iter):
-        # for iter_idx in range(total_batches+1):
+            # for iter_idx in range(total_batches+1):
             seed_end = seed_start + trader.batch_size
-        #     if iter_idx == total_batches:
-        #         if remaining_files == 0:
-        #             break
-        #         seed_end = seed_start + remaining_files
+            #     if iter_idx == total_batches:
+            #         if remaining_files == 0:
+            #             break
+            #         seed_end = seed_start + remaining_files
             seeds = np.arange(seed_start, seed_end)
             str_time = time()  # time() returns time in seconds
             if with_MP:
-                raw_mgr = [create_environment_object(trader=trader, seed=sd, start_num=start_num, end_num=end_num) for
+                mgr_data = [create_environment_object(trader=trader, seed=sd, start_num=start_num, end_num=end_num, epoch=curr_epoch) for
                            sd in seeds]
-                simulations = pool.map(_simulation_worker, raw_mgr)
+                # raw_mgr = [mgr_data[i][0] for i in range(len(mgr_data))]
+                # file_nums = [mgr_data[i][1] for i in range(len(mgr_data))]
+                # simulations = pool.map(_simulation_worker, raw_mgr)
+                simulations = pool.starmap(_simulation_worker, mgr_data)
             else:
-                simulations = [run_scenario(trader=trader, seed=sd, start_num=start_num, end_num=end_num) for sd in
+                simulations = [run_scenario(trader=trader, seed=sd, start_num=start_num, end_num=end_num, epoch=curr_epoch) for sd in
                                seeds]
+            # save simulations
+
             sim_time = (time() - str_time) / 60  # in minutes time taken by the numpy code(simulation of trades)
             str_time = time()
             num_events = [sim.get_num_trade_events() for sim in simulations]
@@ -1337,17 +1374,17 @@ def train_many(trader, num_iter, init_seed=42, with_MP=False, q=1.0, save_every=
                 '\n\n*TRAIN: Epoch:{}, Run {}, LL= {:.5f}±{:.2f}, loss= {:.5f}±{:.2f}, Rwd= {:.5f}±{:.3f}, trade events= {:.2f}±{:.2f}'
                 ' seeds= {}--{}, grad_norm= {:.2f}, step = {}'
                 ', lr = {:.5f}, wt={:.5f}, b_lambda={:.5f}, q={:.5f}, simulation_time={:.5f}, tf_time={:.5f}\n'
-                .format(curr_epoch,
-                        iter_idx,
-                        mean_LL, std_LL,
-                        mean_loss, std_loss,
-                        mean_reward, std_reward,
-                        mean_events, std_events,
-                        seed_start, seed_end - 1,
-                        grad_norm, step, lr,
-                        trader.sess.run(trader.tf_wt)[0],
-                        trader.sess.run(trader.tf_b_lambda)[0],
-                        q, sim_time, tf_time))
+                    .format(curr_epoch,
+                            iter_idx,
+                            mean_LL, std_LL,
+                            mean_loss, std_loss,
+                            mean_reward, std_reward,
+                            mean_events, std_events,
+                            seed_start, seed_end - 1,
+                            grad_norm, step, lr,
+                            trader.sess.run(trader.tf_wt)[0],
+                            trader.sess.run(trader.tf_b_lambda)[0],
+                            q, sim_time, tf_time))
 
             # Ready for the next iter_idx.
             seed_start = seed_end
@@ -1366,7 +1403,7 @@ def train_many(trader, num_iter, init_seed=42, with_MP=False, q=1.0, save_every=
 
 
 def val_many(trader, num_iter, init_seed=42, with_MP=False, q=1.0,
-             batch_size=None, start_num=None, end_num=None):
+             batch_size=None, start_num=None, end_num=None, curr_epoch=None):
     if start_num is None or end_num is None:
         raise ValueError("VALIDATION:Please provide valid start and end datafile number")
     seed_start = init_seed  # + trader.sess.run(trader.global_step) * trader.batch_size
@@ -1383,7 +1420,7 @@ def val_many(trader, num_iter, init_seed=42, with_MP=False, q=1.0,
         if with_MP:
             pool = MP.Pool()
         for iter_idx in range(num_iter):
-        # for iter_idx in range(total_batches + 1):
+            # for iter_idx in range(total_batches + 1):
             seed_end = seed_start + trader.batch_size
             # if iter_idx == total_batches:
             #     if remaining_files == 0:
@@ -1392,11 +1429,12 @@ def val_many(trader, num_iter, init_seed=42, with_MP=False, q=1.0,
             seeds = np.arange(seed_start, seed_end)
             str_time = time()  # time() returns time in seconds
             if with_MP:
-                raw_mgr = [create_environment_object(trader=trader, seed=sd, start_num=start_num, end_num=end_num) for
+                mgr_data = [create_environment_object(trader=trader, seed=sd, start_num=start_num, end_num=end_num, epoch=curr_epoch) for
                            sd in seeds]
-                simulations = pool.map(_simulation_worker, raw_mgr)
+                # simulations = pool.map(_simulation_worker, raw_mgr)
+                simulations = pool.starmap(_simulation_worker, mgr_data)
             else:
-                simulations = [run_scenario(trader=trader, seed=sd, start_num=start_num, end_num=end_num) for sd in
+                simulations = [run_scenario(trader=trader, seed=sd, start_num=start_num, end_num=end_num, epoch=curr_epoch) for sd in
                                seeds]
             sim_time = (time() - str_time) / 60  # in minutes time taken by the numpy code(simulation of trades)
             str_time = time()
@@ -1421,19 +1459,20 @@ def val_many(trader, num_iter, init_seed=42, with_MP=False, q=1.0,
             std_events = np.std(num_events)
 
             print(
-                '\n\n*VALIDATION: Run {}, LL= {:.5f}±{:.2f}, loss= {:.5f}±{:.2f}, Rwd= {:.5f}±{:.3f}, trade events= {:.2f}±{:.2f}'
+                '\n\n*VALIDATION: Epoch:{}, Run {}, LL= {:.5f}±{:.2f}, loss= {:.5f}±{:.2f}, Rwd= {:.5f}±{:.3f}, trade events= {:.2f}±{:.2f}'
                 ' seeds= {}--{}, step = {}'
                 ', lr = {:.5f}, wt={:.5f}, b_lambda={:.5f}, q={:.5f}, simulation_time={:.5f}, tf_time={:.5f}\n'
-                .format(iter_idx,
-                        mean_LL, std_LL,
-                        mean_loss, std_loss,
-                        mean_reward, std_reward,
-                        mean_events, std_events,
-                        seed_start, seed_end - 1,
-                        step, lr,
-                        trader.sess.run(trader.tf_wt)[0],
-                        trader.sess.run(trader.tf_b_lambda)[0],
-                        q, sim_time, tf_time))
+                    .format(curr_epoch,
+                            iter_idx,
+                            mean_LL, std_LL,
+                            mean_loss, std_loss,
+                            mean_reward, std_reward,
+                            mean_events, std_events,
+                            seed_start, seed_end - 1,
+                            step, lr,
+                            trader.sess.run(trader.tf_wt)[0],
+                            trader.sess.run(trader.tf_b_lambda)[0],
+                            q, sim_time, tf_time))
 
             # Ready for the next iter_idx.
             seed_start = seed_end
@@ -1443,8 +1482,8 @@ def val_many(trader, num_iter, init_seed=42, with_MP=False, q=1.0,
             pool.close()
 
 
-def test_many(trader,  num_iter, init_seed=42, with_MP=False, q=1.0,
-              batch_size=None, start_num=None, end_num=None):
+def test_many(trader, num_iter, init_seed=42, with_MP=False, q=1.0,
+              batch_size=None, start_num=None, end_num=None, final_epoch=None):
     if start_num is None or end_num is None:
         raise ValueError("TEST:Please provide valid start and end datafile number")
     seed_start = init_seed  # + trader.sess.run(trader.global_step) * trader.batch_size
@@ -1460,7 +1499,7 @@ def test_many(trader,  num_iter, init_seed=42, with_MP=False, q=1.0,
         if with_MP:
             pool = MP.Pool()
         for iter_idx in range(num_iter):
-        # for iter_idx in range(total_batches + 1):
+            # for iter_idx in range(total_batches + 1):
             seed_end = seed_start + trader.batch_size
             # if iter_idx == total_batches:
             #     if remaining_files == 0:
@@ -1469,11 +1508,12 @@ def test_many(trader,  num_iter, init_seed=42, with_MP=False, q=1.0,
             seeds = np.arange(seed_start, seed_end)
             str_time = time()  # time() returns time in seconds
             if with_MP:
-                raw_mgr = [create_environment_object(trader=trader, seed=sd, start_num=start_num, end_num=end_num) for
+                mgr_data = [create_environment_object(trader=trader, seed=sd, start_num=start_num, end_num=end_num, epoch=final_epoch) for
                            sd in seeds]
-                simulations = pool.map(_simulation_worker, raw_mgr)
+                # simulations = pool.map(_simulation_worker, raw_mgr)
+                simulations = pool.starmap(_simulation_worker, mgr_data)
             else:
-                simulations = [run_scenario(trader=trader, seed=sd, start_num=start_num, end_num=end_num) for sd in
+                simulations = [run_scenario(trader=trader, seed=sd, start_num=start_num, end_num=end_num, epoch=final_epoch) for sd in
                                seeds]
             sim_time = (time() - str_time) / 60  # in minutes time taken by the numpy code(simulation of trades)
             str_time = time()
@@ -1498,19 +1538,20 @@ def test_many(trader,  num_iter, init_seed=42, with_MP=False, q=1.0,
             std_events = np.std(num_events)
 
             print(
-                '\n\n*TEST: Run {}, LL= {:.5f}±{:.2f}, loss= {:.5f}±{:.2f}, Rwd= {:.5f}±{:.3f}, trade events= {:.2f}±{:.2f}'
+                '\n\n*TEST: Epoch:{}, Run {}, LL= {:.5f}±{:.2f}, loss= {:.5f}±{:.2f}, Rwd= {:.5f}±{:.3f}, trade events= {:.2f}±{:.2f}'
                 ' seeds= {}--{}, step = {}'
                 ', lr = {:.5f}, wt={:.5f}, b_lambda={:.5f}, q={:.5f}, simulation_time={:.5f}, tf_time={:.5f}\n'
-                .format(iter_idx,
-                        mean_LL, std_LL,
-                        mean_loss, std_loss,
-                        mean_reward, std_reward,
-                        mean_events, std_events,
-                        seed_start, seed_end - 1,
-                        step, lr,
-                        trader.sess.run(trader.tf_wt)[0],
-                        trader.sess.run(trader.tf_b_lambda)[0],
-                        q, sim_time, tf_time))
+                    .format(final_epoch,
+                            iter_idx,
+                            mean_LL, std_LL,
+                            mean_loss, std_loss,
+                            mean_reward, std_reward,
+                            mean_events, std_events,
+                            seed_start, seed_end - 1,
+                            step, lr,
+                            trader.sess.run(trader.tf_wt)[0],
+                            trader.sess.run(trader.tf_b_lambda)[0],
+                            q, sim_time, tf_time))
 
             # Ready for the next iter_idx.
             seed_start = seed_end
@@ -1576,15 +1617,15 @@ def test_backprop_code():
         step = trader.sess.run(trader.global_step)
         if epoch % check_val_every == 0:
             val_many(trader=trader, num_iter=val_num_iter, init_seed=42, with_MP=True, q=q,
-                     batch_size=batch_size, start_num=val_start_num, end_num=val_end_num)
+                     batch_size=batch_size, start_num=val_start_num, end_num=val_end_num, curr_epoch=epoch)
     chkpt_file = os.path.join(trader.save_dir, 'tpprl.ckpt')
     print('Saving model at global_step:{}'.format(step))
     trader.saver.save(trader.sess, chkpt_file, global_step=trader.global_step, )
-    print("Saved summaries and checkpoints in: {}".format(save_dir))
 
     # test model on test data
     test_many(trader=trader, num_iter=test_num_iter, init_seed=42, with_MP=True, q=q,
-              batch_size=batch_size, start_num=test_start_num, end_num=test_end_num)
+              batch_size=batch_size, start_num=test_start_num, end_num=test_end_num, final_epoch=epoch)
+    print("\nSaved summaries and checkpoints in: {}\n".format(save_dir))
 
 
 if __name__ == '__main__':
